@@ -1,0 +1,906 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>همس</title>
+<link rel="icon" href="/favicon.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#07060d">
+<meta name="description" content="همس يقرأ لك ملفاتك المحاسبية بصوت عربي واضح، ويكتب عنك.">
+<meta property="og:title" content="همس">
+<meta property="og:description" content="يقرأ لك… ويكتب عنك">
+<meta property="og:image" content="/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Reem+Kufi:wght@500;700&family=Amiri:wght@400;700&family=Aref+Ruqaa:wght@700&family=IBM+Plex+Sans+Arabic:wght@400;500;600&display=swap">
+<style>
+/* Design «أ»: night stage with a live wave on top, an open paper ledger below, a tape deck at the bottom */
+:root{
+  --bg:#07060d; --ink:#f4efe6; --mute:#8d8798; --dim:#5f5a6b; --gold:#e9b44c; --rose:#e2557a;
+  --line:rgba(255,255,255,.09); --paper:#f6efdf; --rule:#c9d8e6; --red:#c4473a; --navy:#1f2a44;
+  --deck:#141118; --err:#ff8a7a;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font-family:'IBM Plex Sans Arabic',system-ui,sans-serif;font-size:16px;line-height:1.7;min-height:100vh;overflow-x:hidden}
+button,input,textarea,select{font-family:inherit;font-size:inherit;color:inherit}
+button{cursor:pointer;background:none;border:0;padding:0}
+button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--gold);outline-offset:3px}
+[hidden]{display:none!important}
+.glow{position:absolute;inset:0 0 auto;height:620px;pointer-events:none;background:radial-gradient(50% 55% at 50% 35%,rgba(233,180,76,.17),transparent 70%),radial-gradient(35% 45% at 78% 55%,rgba(226,85,122,.12),transparent 70%)}
+.wrap{position:relative;max-width:1240px;margin:0 auto;padding:0 40px 60px}
+
+/* header */
+header{display:flex;justify-content:space-between;align-items:center;padding:24px 0;gap:16px;flex-wrap:wrap}
+.logo{display:flex;align-items:center;gap:12px;text-align:right}
+.seal{width:48px;height:48px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#e06b5b,#8e2b22);display:flex;gap:3px;align-items:center;justify-content:center;box-shadow:0 0 0 3px rgba(233,180,76,.3),0 6px 18px rgba(0,0,0,.6)}
+.seal span{width:3px;border-radius:3px;background:#fbe9d6}
+.seal span:nth-child(1){height:10px}.seal span:nth-child(2){height:20px}.seal span:nth-child(3){height:26px}.seal span:nth-child(4){height:16px}
+body.playing .seal span{animation:bar 1.2s ease-in-out infinite}
+body.playing .seal span:nth-child(2){animation-delay:.15s}body.playing .seal span:nth-child(3){animation-delay:.3s}body.playing .seal span:nth-child(4){animation-delay:.45s}
+@keyframes bar{50%{transform:scaleY(.45)}}
+.logo h1{margin:0;font-family:'Aref Ruqaa';font-size:44px;font-weight:700;line-height:1.5;display:inline-block;padding:.55em .14em .14em;margin:-.42em 0 -.2em;transform:rotate(-6deg);background:linear-gradient(90deg,#f3c766,#e2557a);-webkit-background-clip:text;background-clip:text;color:transparent}
+.logo small{margin-top:-2px}
+.logo small{display:block;color:var(--mute);font-size:12px}
+nav{display:flex;gap:28px}
+nav button{color:var(--mute);font-size:15px;padding:6px 0;border-bottom:1px solid transparent}
+nav button[aria-current="page"]{color:var(--ink);border-bottom-color:var(--gold)}
+
+/* shared bits */
+.err{background:rgba(255,138,122,.12);color:var(--err);border:1px solid rgba(255,138,122,.3);border-radius:12px;padding:10px 14px;font-size:14px}
+.info{background:rgba(233,180,76,.1);color:var(--gold);border:1px solid rgba(233,180,76,.25);border-radius:12px;padding:10px 14px;font-size:14px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:44px;padding:0 18px;border-radius:999px;border:1px solid rgba(255,255,255,.16);color:var(--ink);font-size:14px}
+.btn:hover{border-color:rgba(233,180,76,.6)}
+.btn.gold{background:var(--gold);border-color:var(--gold);color:var(--bg);font-weight:600;font-size:16px;min-height:52px;padding:0 28px;box-shadow:0 0 40px rgba(233,180,76,.3)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+
+/* new notebook (upload) */
+.hero{text-align:center;padding:24px 0 10px}
+.hero h2{font-family:'Reem Kufi';font-weight:500;font-size:clamp(28px,4vw,44px);margin:0 0 6px}
+.hero p{color:var(--mute);margin:0 auto 26px;max-width:560px}
+.hero-wave{display:flex;align-items:center;justify-content:center;gap:5px;height:90px;margin-bottom:18px}
+.sheet{max-width:820px;margin:0 auto;background:var(--paper);color:var(--navy);border-radius:10px;padding:28px 36px 30px;box-shadow:0 30px 70px rgba(0,0,0,.6),0 -10px 60px rgba(233,180,76,.12);background-image:repeating-linear-gradient(transparent 0 37px,var(--rule) 37px 38px);background-position:0 64px;position:relative}
+.sheet:after{content:'';position:absolute;top:0;bottom:0;right:26px;width:2px;background:rgba(196,71,58,.45)}
+.sheet h3{font-family:'Aref Ruqaa';color:var(--red);font-size:28px;margin:0 0 14px}
+.seg{display:flex;gap:6px;margin-bottom:16px}
+.seg button{padding:7px 16px;border-radius:999px;border:1px solid rgba(31,42,68,.2);color:#5b6378;font-size:14px;background:rgba(255,255,255,.6)}
+.seg button[aria-selected="true"]{background:var(--navy);color:var(--paper);border-color:var(--navy)}
+.dz{position:relative;z-index:1;border:2px dashed rgba(196,71,58,.45);border-radius:14px;padding:36px 16px;text-align:center;background:#fbf7ec}
+.seg,#paste-box,.picked,.check,.go-row,.sheet h3,.sheet .err{position:relative;z-index:1}
+.dz.over{background:#fff6b8}
+.dz input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
+.dz b{display:block;font-family:'Amiri';font-size:24px}
+.dz span{color:#6d6758;font-size:14px}
+.dz .plus{font-family:'Aref Ruqaa';color:var(--red);font-size:40px;line-height:1}
+textarea.ed{width:100%;min-height:200px;border:1px solid rgba(31,42,68,.2);border-radius:12px;background:rgba(255,255,255,.7);padding:12px 14px;font-family:'Amiri';font-size:20px;line-height:1.9;color:var(--navy);resize:vertical}
+.picked{display:flex;align-items:center;gap:12px;border:1px solid rgba(31,42,68,.2);border-radius:12px;padding:12px 16px;background:rgba(255,255,255,.7)}
+.picked .nm{flex:1;font-weight:600;overflow-wrap:anywhere}
+.picked .sz{color:#6d6758;font-size:13px}
+.picked button{color:var(--red);font-size:22px;line-height:1}
+.check{display:flex;gap:10px;align-items:flex-start;font-size:14px;color:#4a5164;margin:14px 0 4px}
+.check input{width:18px;height:18px;margin-top:4px;accent-color:var(--red)}
+.go-row{display:flex;justify-content:center;margin-top:18px}
+.sheet .err{margin-top:12px}
+
+/* preparing */
+.work{max-width:640px;margin:40px auto 0;text-align:center}
+.work h2{font-family:'Reem Kufi';font-weight:500;font-size:30px;margin:0 0 8px}
+.work .stage-lbl{color:var(--gold);margin-bottom:14px}
+.track{height:4px;border-radius:4px;background:var(--line);position:relative;overflow:hidden}
+.track>div{position:absolute;inset:0 auto 0 0;width:0;right:0;left:auto;background:linear-gradient(270deg,var(--rose),var(--gold));border-radius:4px;transition:width .3s}
+.work .live{min-height:3em;color:var(--dim);font-size:13px;margin:14px 0;white-space:pre-wrap;overflow-wrap:anywhere}
+
+/* stage */
+.stage{text-align:center;padding:4px 0 0}
+.doc-lbl{font-size:13px;letter-spacing:2px;color:var(--gold)}
+.wave{display:flex;align-items:center;justify-content:center;gap:5px;height:100px;margin:6px 0 2px}
+.wave i{display:block;width:5px;border-radius:5px;background:linear-gradient(180deg,var(--gold),var(--rose));transform:scaleY(.18);transition:transform .4s}
+body.playing .wave i{animation:wv 1.6s ease-in-out infinite}
+@keyframes wv{0%,100%{transform:scaleY(.25)}50%{transform:scaleY(1)}}
+.now{font-family:'Amiri';font-size:clamp(22px,2.6vw,32px);line-height:1.75;min-height:2.2em;max-width:980px;margin:0 auto;color:var(--ink);text-shadow:0 0 24px rgba(233,180,76,.18)}
+.buffering{color:var(--gold);font-size:13px;margin-top:4px}
+
+/* ledger */
+.book{position:relative;margin:18px auto 0;max-width:1060px;display:grid;grid-template-columns:1fr 1fr;background:var(--paper);color:var(--navy);border-radius:8px 8px 0 0;box-shadow:0 -10px 60px rgba(233,180,76,.12)}
+.book:before{content:'';position:absolute;top:0;bottom:0;left:50%;width:44px;transform:translateX(-50%);background:linear-gradient(90deg,transparent,rgba(0,0,0,.16),transparent);pointer-events:none}
+.page{position:relative;padding:20px 36px 22px;height:300px;overflow-y:auto;scroll-behavior:smooth;background-image:repeating-linear-gradient(transparent 0 31px,var(--rule) 31px 32px);background-attachment:local;background-position:0 52px}
+.page.right:after{content:'';position:absolute;top:0;bottom:0;right:24px;width:2px;background:rgba(196,71,58,.45)}
+.page h3{font-family:'Aref Ruqaa';color:var(--red);font-size:22px;margin:0 0 6px;line-height:1.45}
+.page .txt{font-family:'Amiri';font-size:17.5px;line-height:32px}
+.page p{margin:0}
+.s{cursor:pointer;padding:1px 3px;border-radius:3px;transition:background .2s}
+.s:hover{background:rgba(31,42,68,.07)}
+.s.done{color:#7d796d}
+.s.cur{background:linear-gradient(100deg,transparent 1%,#fff27a 3%,#ffe94d 97%,transparent 99%);color:var(--navy)}
+.s.mark-b{border-bottom:2px solid var(--red)}
+.pager{position:absolute;bottom:10px;left:0;right:0;display:flex;justify-content:center;gap:10px;font-size:13px;color:#6d6758;pointer-events:none}
+.pgnav{max-width:1060px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;padding:8px 26px;background:#ece3cf;color:#6d6758;font-size:13px;border-top:1px solid rgba(0,0,0,.06)}
+.pgnav button{color:var(--red);font-weight:600;padding:2px 8px}
+.pgnav button:disabled{color:#b9b19f;cursor:default}
+
+/* deck */
+.deck{max-width:1060px;margin:0 auto;background:linear-gradient(#26222e,var(--deck));border:1px solid var(--line);border-top:none;border-radius:0 0 18px 18px;padding:18px 26px 20px}
+.deck-row{display:flex;align-items:center;gap:22px}
+.reels{display:flex;gap:12px;background:#0b0a10;border-radius:12px;padding:9px 16px;flex:none}
+.reel{width:40px;height:40px;border-radius:50%;background:repeating-conic-gradient(var(--gold) 0 20deg,#7a5a24 20deg 40deg);display:grid;place-items:center}
+.reel:after{content:'';width:13px;height:13px;border-radius:50%;background:#0b0a10}
+body.playing .reel{animation:spin 3s linear infinite}
+@keyframes spin{to{transform:rotate(-360deg)}}
+.ctrls{display:flex;align-items:center;gap:14px;flex:none}
+.c{width:46px;height:46px;border-radius:50%;border:1px solid rgba(255,255,255,.14);display:grid;place-items:center;color:var(--ink);position:relative}
+.c:hover{border-color:rgba(233,180,76,.6);color:var(--gold)}
+.c svg{width:20px;height:20px}
+.c .n{position:absolute;font-size:10px;font-weight:600;bottom:9px}
+.c.sm{width:38px;height:38px;color:var(--mute)}
+.sent{display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1.25;min-width:62px;height:50px;padding:0 12px;border-radius:14px;border:1px solid rgba(255,255,255,.14);color:var(--mute);font-size:13px}
+.sent span:last-child{color:var(--ink);font-weight:600}
+.sent:hover{border-color:rgba(233,180,76,.6);color:var(--gold)}
+.skipc{position:relative;width:58px;height:58px;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--ink);line-height:1.1}
+.skipc svg{position:absolute;inset:0;width:100%;height:100%;color:rgba(233,180,76,.7)}
+.skipc b{font-size:15px;font-weight:600;direction:ltr}
+.skipc small{font-size:10px;color:var(--mute)}
+.skipc:hover svg{color:var(--gold)}
+.c.sm svg{width:16px;height:16px}
+.play{width:66px;height:66px;border-radius:50%;background:var(--ink);color:var(--bg);display:grid;place-items:center;box-shadow:0 0 40px rgba(233,180,76,.35)}
+.play svg{width:24px;height:24px}
+.prog{flex:1;min-width:0}
+.prog .meta{display:flex;justify-content:space-between;color:var(--mute);font-size:13px;margin-bottom:6px;gap:10px}
+.prog input[type=range]{width:100%;accent-color:var(--gold);height:20px;margin:0}
+.tools{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
+.pill{display:inline-flex;align-items:center;gap:6px;min-height:36px;padding:0 14px;border-radius:999px;border:1px solid rgba(255,255,255,.14);color:var(--mute);font-size:13px;background:none}
+.pill:hover{color:var(--ink);border-color:rgba(233,180,76,.5)}
+.pill[aria-pressed="true"]{color:var(--bg);background:var(--gold);border-color:var(--gold)}
+.pill svg{width:15px;height:15px}
+.grp{display:inline-flex;align-items:center;gap:4px;border:1px solid rgba(255,255,255,.14);border-radius:999px;padding:3px}
+.grp .lbl{color:var(--mute);font-size:12px;padding:0 8px}
+.grp button{min-height:30px;padding:0 10px;border-radius:999px;color:var(--mute);font-size:13px}
+.grp button[aria-pressed="true"]{background:var(--gold);color:var(--bg)}
+.vol{display:inline-flex;align-items:center;gap:8px;color:var(--mute);font-size:13px}
+.vol input{width:110px;accent-color:var(--gold)}
+.marks{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.markchip{display:inline-flex;align-items:center;gap:6px;border-radius:999px;background:rgba(196,71,58,.16);color:#f3b2a9;font-size:13px;padding:4px 6px 4px 12px}
+.markchip button{color:#f3b2a9;font-size:15px;width:22px;height:22px;border-radius:50%}
+.markchip button:hover{background:rgba(255,255,255,.1)}
+.deck .err,.deck .info{margin-top:12px}
+.under{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;align-items:center}
+.under .note{color:var(--mute);font-size:13px}
+.editor{margin-top:16px;background:var(--paper);color:var(--navy);border-radius:14px;padding:18px 22px}
+.editor b{font-family:'Aref Ruqaa';color:var(--red);font-size:22px}
+.editor p{margin:4px 0 10px;font-size:14px;color:#6d6758}
+
+/* my notebooks */
+.lib-head{display:flex;justify-content:space-between;align-items:end;gap:16px;margin:16px 0 22px;flex-wrap:wrap}
+.lib-head h2{font-family:'Reem Kufi';font-weight:500;font-size:34px;margin:0}
+.lib-head p{margin:0;color:var(--mute);font-size:14px}
+.shelf{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:22px}
+.nb{position:relative;background:var(--paper);color:var(--navy);border-radius:6px 14px 14px 6px;padding:20px 22px 16px 22px;min-height:210px;display:flex;flex-direction:column;box-shadow:0 18px 40px rgba(0,0,0,.55);background-image:repeating-linear-gradient(transparent 0 29px,var(--rule) 29px 30px);background-position:0 56px;border-right:10px solid var(--red)}
+.nb h4{font-family:'Aref Ruqaa';font-size:23px;margin:0 0 4px;line-height:1.4;overflow-wrap:anywhere}
+.nb .when{font-size:13px;color:#6d6758}
+.nb .bar2{height:4px;border-radius:4px;background:rgba(31,42,68,.12);margin:auto 0 12px;position:relative;overflow:hidden}
+.nb .bar2 i{position:absolute;top:0;bottom:0;right:0;background:var(--red);border-radius:4px}
+.nb .acts{display:flex;gap:8px}
+.nb .acts button{min-height:36px;padding:0 14px;border-radius:999px;font-size:13px;border:1px solid rgba(31,42,68,.25);color:var(--navy);background:rgba(255,255,255,.6)}
+.nb .acts button.main{background:var(--navy);color:var(--paper);border-color:var(--navy)}
+.nb.add{border:2px dashed rgba(233,180,76,.5);border-right-width:2px;background:none;color:var(--gold);align-items:center;justify-content:center;text-align:center;box-shadow:none;cursor:pointer}
+.nb.add .plus{font-family:'Aref Ruqaa';font-size:46px;line-height:1}
+.empty{color:var(--mute);padding:20px 0}
+
+@media (max-width:900px){
+  .wrap{padding:0 16px 40px}
+  .book{grid-template-columns:1fr}
+  .book:before{display:none}
+  .page{height:auto;max-height:380px}
+  .deck-row{flex-wrap:wrap;justify-content:center}
+  .reels{display:none}
+  .prog{flex-basis:100%;order:3}
+  nav{gap:18px}
+}
+@media (prefers-reduced-motion: reduce){body.playing .wave i,body.playing .reel,body.playing .seal span{animation:none}}
+</style>
+</head>
+<body>
+<div class="glow"></div>
+<div class="wrap">
+
+<header>
+  <button class="logo" type="button" id="brand" aria-label="الصفحة الرئيسية">
+    
+    <span><h1>همس</h1><small>يقرأ لك… ويكتب عنك</small></span>
+  </button>
+  <nav>
+    <button type="button" data-nav="player" id="nav-player" hidden>يُقرأ الآن</button>
+    <button type="button" data-nav="library">دفاتري</button>
+    <button type="button" data-nav="home">دفتر جديد</button>
+  </nav>
+</header>
+
+<main>
+<!-- new notebook -->
+<section id="view-home">
+  <div class="hero">
+    <div class="hero-wave wave" id="hero-wave" aria-hidden="true"></div>
+    <h2>افتح دفترك، ونقرأه لك</h2>
+    <p>ارفع ملف أو صورة أو ألصق نص. نرتّب القيود والجداول كجمل مفهومة، ونقرأها لك بصوت عربي واضح خلال ثواني.</p>
+  </div>
+  <div class="sheet">
+    <h3>دفتر جديد</h3>
+    <div class="seg" role="tablist">
+      <button type="button" role="tab" id="tab-doc" aria-selected="true">ملف أو صورة</button>
+      <button type="button" role="tab" id="tab-text" aria-selected="false">ألصق نص</button>
+    </div>
+    <div class="dz" id="dz">
+      <div class="plus">+</div>
+      <b>اسحب ملفك هنا، أو اضغط لاختياره</b>
+      <span>ملف أو صورة، حتى ٤٠ صفحة</span>
+      <input id="file" type="file" accept="application/pdf,.pdf,image/*,.heic" aria-label="اختيار ملف">
+    </div>
+    <div id="paste-box" hidden><textarea id="paste" class="ed" dir="auto" placeholder="ألصق النص هنا…" aria-label="النص"></textarea></div>
+    <div class="picked" id="picked" hidden>
+      <span class="nm" id="pk-name" dir="auto"></span><span class="sz" id="pk-meta"></span>
+      <button type="button" id="pk-clear" aria-label="إزالة الملف">×</button>
+    </div>
+    <label class="check" id="claude-opt"><input type="checkbox" id="use-claude" checked><span>تجهيز محاسبي ذكي: يرتّب القيود والجداول ويحوّلها لجمل مفهومة بالسماع.</span></label>
+    <div class="err" id="err" role="alert" hidden></div>
+    <div class="go-row"><button type="button" class="btn gold" id="go" disabled>افتح الدفتر واقرأ</button></div>
+  </div>
+</section>
+
+<!-- preparing -->
+<section id="view-work" hidden>
+  <div class="work" aria-live="polite">
+    <div class="wave" id="work-wave" aria-hidden="true"></div>
+    <h2>نجهّز دفترك</h2>
+    <div class="stage-lbl" id="stage">…</div>
+    <div class="track"><div id="bar"></div></div>
+    <div class="live" id="live" dir="auto"></div>
+    <button type="button" class="btn" id="stop">إيقاف</button>
+  </div>
+</section>
+
+<!-- reading -->
+<section id="view-player" hidden>
+  <div class="stage">
+    <div class="doc-lbl" id="now-page"></div>
+    <div class="wave" id="wave" aria-hidden="true"></div>
+    <p class="now" id="now-text" dir="auto" aria-live="polite"></p>
+    <div class="buffering" id="buffering" hidden>نجهّز الجملة… (تأكد من اتصال الإنترنت)</div>
+  </div>
+
+  <div class="book" id="book">
+    <div class="page right" id="pg-r"></div>
+    <div class="page" id="pg-l"></div>
+  </div>
+  <div class="pgnav">
+    <button type="button" id="pg-prev">→ الصفحة السابقة</button>
+    <span id="pg-lbl"></span>
+    <button type="button" id="pg-next">الصفحة التالية ←</button>
+  </div>
+
+  <div class="deck">
+    <div class="deck-row">
+      <div class="reels" aria-hidden="true"><div class="reel"></div><div class="reel"></div></div>
+      <div class="ctrls">
+        <button type="button" class="sent" id="b-next" aria-label="الجملة التالية"><span>الجملة</span><span>التالية</span></button>
+        <button type="button" class="skipc" id="b-fwd" aria-label="تقديم ١٠ ثواني"><svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 31A16 16 0 1 0 14 13"/><path d="M14 6v7h7"/></svg><b>+١٠</b><small>ثواني</small></button>
+        <button type="button" class="play" id="b-play" aria-label="تشغيل أو إيقاف"><span id="ic-play"></span></button>
+        <button type="button" class="skipc" id="b-back" aria-label="تأخير ١٠ ثواني"><svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M38 31A16 16 0 1 1 34 13"/><path d="M34 6v7h-7"/></svg><b>−١٠</b><small>ثواني</small></button>
+        <button type="button" class="sent" id="b-prev" aria-label="الجملة السابقة"><span>الجملة</span><span>السابقة</span></button>
+      </div>
+      <div class="prog">
+        <div class="meta"><span id="t-pos"></span><span><span id="t-cur"></span> من <span id="t-tot"></span></span></div>
+        <input type="range" id="seek" min="0" max="1000" value="0" step="1" aria-label="موضع القراءة">
+      </div>
+    </div>
+
+    <div class="tools">
+      <div class="grp" role="group" aria-label="السرعة"><span class="lbl">السرعة</span><span id="speeds"></span></div>
+      <label class="vol">الصوت <input type="range" id="vol" min="0" max="1" step="0.05" aria-label="مستوى الصوت"></label>
+      <button type="button" class="pill" id="b-loop" aria-pressed="false" title="يعيد الجملة الحالية مرة بعد مرة"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/></svg>تكرار الجملة</button>
+      <div class="grp" role="group" aria-label="مؤقت الإيقاف"><span class="lbl" id="sleep-lbl">إيقاف بعد</span><button type="button" data-sleep="0" aria-pressed="true">لا</button><button type="button" data-sleep="10">١٠ د</button><button type="button" data-sleep="20">٢٠ د</button><button type="button" data-sleep="30">٣٠ د</button></div>
+      <button type="button" class="pill" id="b-mark" title="احفظ مكانك الحالي"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M6 3h12v18l-6-4-6 4z"/></svg>علامة</button>
+      <button type="button" class="pill" id="export"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14"/></svg>حفظ الشريط</button>
+      <button type="button" class="pill" id="edit-toggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg>تعديل النص</button>
+    </div>
+    <div class="marks" id="marks"></div>
+    <div class="under"><span class="note" id="rec-txt"></span><span class="note" id="exp-note"></span></div>
+    <div class="err" id="p-err" role="alert" hidden></div>
+    <div class="info" id="p-note" hidden></div>
+  </div>
+
+  <div class="editor" id="edit-card" hidden>
+    <b>تعديل النص</b>
+    <p>كل سطر جملة. عدّل أي كلمة تنقرأ غلط ثم اضغط «تطبيق».</p>
+    <textarea id="txt" class="ed" dir="auto" aria-label="نص الدفتر"></textarea>
+    <div class="go-row"><button type="button" class="btn gold" id="apply-txt">تطبيق التعديل</button></div>
+  </div>
+</section>
+
+<!-- my notebooks -->
+<section id="view-library" hidden>
+  <div class="lib-head"><h2>دفاتري</h2><p>دفاترك محفوظة على هذا الجهاز، ويرجع لك المكان اللي وقفت عنده.</p></div>
+  <div class="shelf" id="lib"></div>
+  <div class="empty" id="lib-empty" hidden>ما عندك دفاتر بعد. افتح أول دفتر من «دفتر جديد».</div>
+</section>
+</main>
+</div>
+
+<script>
+(function(){
+'use strict';
+var SPEEDS = [0.75, 1, 1.25, 1.5, 2];
+var LIB_KEY = 'dafter2.library', SPEED_KEY = 'dafter2.speed', VOL_KEY = 'dafter2.vol';
+var AR = '٠١٢٣٤٥٦٧٨٩';
+var PLAY_SVG = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>';
+var PAUSE_SVG = '<svg viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"/></svg>';
+
+function $(id){ return document.getElementById(id); }
+function toAr(s){ return String(s).replace(/\d/g, function(d){ return AR[d]; }); }
+function toLat(s){ return String(s).replace(/[٠-٩]/g, function(d){ return AR.indexOf(d); }).replace(/[۰-۹]/g, function(d){ return '۰۱۲۳۴۵۶۷۸۹'.indexOf(d); }); }
+function fmt(sec){ sec = Math.max(0, Math.round(sec || 0)); var h = Math.floor(sec/3600), m = Math.floor(sec % 3600 / 60), s = sec % 60; return toAr((h ? h + ':' : '') + (m < 10 && h ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s); }
+function lsGet(k, d){ try { var v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }
+function lsSet(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+function clamp(v, a, b){ return Math.min(b, Math.max(a, v)); }
+function sizeText(n){ var kb = n / 1024; return kb >= 1024 ? toAr((kb/1024).toFixed(1)).replace('.', '٫') + ' ميغابايت' : toAr(Math.max(1, Math.round(kb))) + ' كيلوبايت'; }
+function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+async function api(path, opts){
+  var r = await fetch(path, opts);
+  if (!r.ok) { var e = new Error('http'); e.status = r.status; try { e.code = (await r.json()).detail; } catch (x) {} throw e; }
+  return r;
+}
+async function postJSON(path, body){ return (await api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json(); }
+
+/* the wave bars (decorative; they move only while reading) */
+function buildWave(id, n, maxH){
+  var w = $(id); if (!w) return;
+  for (var i = 0; i < n; i++) {
+    var e = document.createElement('i');
+    e.style.height = (14 + Math.round(maxH * Math.abs(Math.sin(i * .37) * Math.cos(i * .11)))) + 'px';
+    e.style.animationDelay = (i * .045) + 's';
+    w.appendChild(e);
+  }
+}
+buildWave('wave', 72, 86); buildWave('hero-wave', 54, 70); buildWave('work-wave', 40, 60);
+
+var S = { mode: 'doc', file: null, view: 'home', job: null, status: null };
+var P = null;
+
+/* ---------- views ---------- */
+function show(name){
+  S.view = name;
+  ['home', 'work', 'player', 'library'].forEach(function(v){ $('view-' + v).hidden = (v !== name); });
+  document.querySelectorAll('nav button').forEach(function(b){
+    var t = b.getAttribute('data-nav');
+    b.setAttribute('aria-current', (t === name || (t === 'home' && name === 'work')) ? 'page' : 'false');
+  });
+  $('nav-player').hidden = !P;
+  document.body.classList.toggle('working', name === 'work');
+  if (name !== 'player') pausePlayer();
+  if (name === 'library') renderLibrary();
+  if (name === 'home') refreshStatus();
+  window.scrollTo(0, 0);
+}
+document.querySelectorAll('[data-nav]').forEach(function(b){ b.addEventListener('click', function(){ show(b.getAttribute('data-nav')); }); });
+$('brand').addEventListener('click', function(){ show(P ? 'player' : 'home'); });
+function showErr(id, msg){ var e = $(id); e.textContent = msg || ''; e.hidden = !msg; }
+
+async function refreshStatus(){
+  try { S.status = await (await api('/api/status')).json(); } catch (e) { S.status = null; }
+  return S.status;
+}
+
+/* ---------- picking ---------- */
+function setMode(m){
+  S.mode = m; S.file = null; showErr('err', '');
+  $('tab-doc').setAttribute('aria-selected', String(m === 'doc'));
+  $('tab-text').setAttribute('aria-selected', String(m === 'text'));
+  renderPicked();
+}
+function renderPicked(){
+  var txt = S.mode === 'text', has = !!S.file;
+  $('dz').hidden = txt || has; $('picked').hidden = txt || !has; $('paste-box').hidden = !txt; $('claude-opt').hidden = txt;
+  $('go').disabled = txt ? !$('paste').value.trim() : !has;
+  if (has && !txt) { $('pk-name').textContent = S.file.name; $('pk-meta').textContent = sizeText(S.file.size); }
+}
+function setFile(f){
+  showErr('err', '');
+  if (!(/\.pdf$/i.test(f.name) || /^image\//.test(f.type) || /\.(heic|png|jpe?g|webp)$/i.test(f.name))) { showErr('err', 'اختر ملف أو صورة.'); return; }
+  S.file = f; renderPicked();
+}
+$('paste').addEventListener('input', renderPicked);
+$('file').addEventListener('change', function(e){ var f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) setFile(f); });
+$('dz').addEventListener('dragenter', function(){ $('dz').classList.add('over'); });
+['dragleave', 'drop'].forEach(function(ev){ $('dz').addEventListener(ev, function(){ $('dz').classList.remove('over'); }); });
+$('pk-clear').addEventListener('click', function(){ S.file = null; renderPicked(); });
+$('tab-doc').addEventListener('click', function(){ setMode('doc'); });
+$('tab-text').addEventListener('click', function(){ setMode('text'); });
+$('go').addEventListener('click', function(){
+  if (S.mode === 'text') {
+    var t = $('paste').value.trim(); if (!t) return;
+    var first = t.split(/\n/)[0].trim().slice(0, 40);
+    var it = saveToLib(first || 'نص ملصوق', t, ''); $('paste').value = ''; renderPicked();
+    openPlayer(it); return;
+  }
+  if (S.file) convertDoc();
+});
+
+/* ---------- converting ---------- */
+var ERRS = {
+  bad_pdf: 'تعذّر فتح الملف. تأكد أنه سليم وغير محمي بكلمة سر.',
+  empty: 'ما لقيت نصاً مقروءاً في الملف.',
+  timeout: 'استغرق التجهيز وقتاً طويلاً. جرّب ملفاً أصغر.',
+  bad_type: 'نوع الملف غير مدعوم.'
+};
+function setProgress(f, label){ $('bar').style.width = Math.round(clamp(f, 0, 1) * 100) + '%'; if (label) $('stage').textContent = label; }
+async function convertDoc(){
+  var f = S.file; if (!f) return;
+  showErr('err', ''); show('work'); document.body.classList.add('playing'); setProgress(0.02, 'نرفع الملف…'); $('live').textContent = '';
+  try {
+    var fd = new FormData(); fd.append('file', f, f.name);
+    var r = await (await api('/api/prepare?use_claude=' + ($('use-claude').checked ? 'true' : 'false'), { method: 'POST', body: fd })).json();
+    S.job = r.job;
+    while (true) {
+      await sleep(700);
+      var j = await (await api('/api/jobs/' + r.job)).json();
+      setProgress(j.progress, j.stage ? toAr(j.stage) : '');
+      $('live').textContent = j.live || '';
+      if (j.status === 'done') {
+        S.job = null; S.file = null; renderPicked();
+        openPlayer(saveToLib(j.result.name.replace(/\.[^.]+$/, ''), j.result.text, j.result.note, j.result.engine));
+        return;
+      }
+      if (j.status === 'error') { var e = new Error('job'); e.code = j.error; throw e; }
+    }
+  } catch (e) {
+    S.job = null; document.body.classList.remove('playing'); show('home');
+    if (e.code !== 'cancelled') showErr('err', ERRS[e.code] || (e.status ? 'صار خطأ أثناء التجهيز. جرّب مرة ثانية.' : 'الموقع مو شغّال. شغّل ملف «تشغيل همس» ثم حدّث الصفحة.'));
+  }
+}
+$('stop').addEventListener('click', function(){ if (S.job) fetch('/api/jobs/' + S.job + '/cancel', { method: 'POST' }); });
+
+/* ---------- my notebooks ---------- */
+function saveToLib(name, text, note, engine){
+  var lib = lsGet(LIB_KEY, []), it = { id: String(Date.now()), name: name, ts: Date.now(), text: text, note: note || '', engine: engine || '', pos: 0, marks: [] };
+  lib.unshift(it); lsSet(LIB_KEY, lib.slice(0, 40)); return it;
+}
+function updateLib(id, patch){
+  var lib = lsGet(LIB_KEY, []);
+  lib.forEach(function(x){ if (x.id === id) Object.assign(x, patch); });
+  lsSet(LIB_KEY, lib);
+}
+function renderLibrary(){
+  var lib = lsGet(LIB_KEY, []), box = $('lib'); box.textContent = '';
+  var add = document.createElement('div'); add.className = 'nb add'; add.tabIndex = 0;
+  add.innerHTML = '<div><div class="plus">+</div><div>دفتر جديد</div></div>';
+  add.addEventListener('click', function(){ show('home'); });
+  box.appendChild(add);
+  $('lib-empty').hidden = lib.length > 0;
+  lib.forEach(function(it){
+    var n = buildSents(it.text).length || 1, pct = Math.round(100 * (it.pos || 0) / n);
+    var card = document.createElement('div'); card.className = 'nb';
+    var h = document.createElement('h4'); h.textContent = it.name; h.dir = 'auto';
+    var w = document.createElement('div'); w.className = 'when';
+    try { w.textContent = new Date(it.ts).toLocaleDateString('ar-SA-u-ca-gregory-nu-arab', { dateStyle: 'medium' }) + ' · ' + (it.pos ? toAr(pct) + '٪' : 'جديد'); } catch (e) {}
+    var bar = document.createElement('div'); bar.className = 'bar2'; bar.innerHTML = '<i style="width:' + pct + '%"></i>';
+    var acts = document.createElement('div'); acts.className = 'acts';
+    var open = document.createElement('button'); open.type = 'button'; open.className = 'main'; open.textContent = it.pos ? 'أكمل الاستماع' : 'استمع';
+    open.addEventListener('click', function(){ openPlayer(it); });
+    var del = document.createElement('button'); del.type = 'button'; del.textContent = 'حذف';
+    var armed = false;
+    del.addEventListener('click', function(){
+      if (!armed) { armed = true; del.textContent = 'تأكيد الحذف'; return; }
+      lsSet(LIB_KEY, lsGet(LIB_KEY, []).filter(function(x){ return x.id !== it.id; }));
+      if (P && P.item.id === it.id) { pausePlayer(); P = null; }
+      renderLibrary();
+    });
+    acts.appendChild(open); acts.appendChild(del);
+    card.appendChild(h); card.appendChild(w); card.appendChild(bar); card.appendChild(acts);
+    box.appendChild(card);
+  });
+}
+
+/* ---------- making text speakable ---------- */
+var MONTHS = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+/* Hamed reads digits, dates and percentages correctly himself: keep numbers as digits,
+   only turn accounting symbols into words */
+function speakable(text){
+  var t = toLat(text).replace(/ـ/g, '');
+  t = t.replace(/ح\s*\/\s*/g, 'حساب ');
+  t = t.replace(/ر\s*\.\s*س\s*\.?/g, 'ريال سعودي');
+  t = t.replace(/(^|[^\d])(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})(?!\d)/g, function(m, pre, d, mo, y){
+    d = +d; mo = +mo;
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return m;
+    return pre + d + ' ' + MONTHS[mo - 1] + ' ' + y;
+  });
+  t = t.replace(/\(\s*(\d[\d,٬]*(?:[.٫]\d+)?)\s*\)/g, 'سالب $1');
+  t = t.replace(/\s*[=＝]\s*/g, ' يساوي ').replace(/\s*[→⟶]\s*/g, ' يؤدي إلى ').replace(/↑/g, ' يرتفع ').replace(/↓/g, ' ينخفض ');
+  t = t.replace(/[*•▪◦■□●#_|\[\]]+/g, ' ').replace(/\s*[:：]\s*/g, '، ').replace(/\s+[-–—]+\s+/g, '، ');
+  t = t.replace(/^[\s.,،:؛-]+/, '');
+  t = t.replace(/\s+/g, ' ').replace(/\s+([،.؛!؟])/g, '$1').trim();
+  t = t.replace(/[،,؛]+$/, '');
+  if (!/[.!؟?]$/.test(t)) t += '.';
+  return t;
+}
+function chunkLong(s, max){
+  if (s.length <= max) return [s];
+  var out = [], buf = '';
+  /* split long lines at commas first, then by words; commas inside numbers (45,750) are not pauses */
+  var safe = s.replace(/(\d),(?=\d{3}(?!\d))/g, '$1\u0002');
+  (safe.match(/[^،,]+[،,]?/g) || [safe]).forEach(function(part){
+    part = part.replace(/\u0002/g, ',').trim();
+    if (buf && (buf + ' ' + part).length > max) { out.push(buf); buf = ''; }
+    if (part.length > max) {
+      part.split(/\s+/).forEach(function(w){
+        if (buf && (buf + ' ' + w).length > max) { out.push(buf); buf = w; } else buf = buf ? buf + ' ' + w : w;
+      });
+    } else buf = buf ? buf + ' ' + part : part;
+  });
+  if (buf) out.push(buf);
+  return out;
+}
+/* sentences with natural pauses: only a breath between sentences, a bit more after a heading or a new page */
+function buildSents(text){
+  var out = [], page = 0, ln = 0, newPage = false;
+  String(text).split(/\n+/).forEach(function(rawLine){
+    var line = rawLine.trim(); if (!line) return;
+    var m = line.match(/^=+\s*الصفحة\s*([0-9٠-٩]+)\s*=+$/);
+    if (m) { page = parseInt(toLat(m[1]), 10); newPage = true; return; }
+    ln++;
+    var safe = line.replace(/(\d)\.(\d)/g, '$1\u0001$2').replace(/ر\.س\./g, 'ر\u0001س\u0001').replace(/ر\.س/g, 'ر\u0001س');
+    var parts = safe.match(/[^.!؟?؛]+[.!؟?؛]*/g) || [safe];
+    var lineSents = [];
+    parts.forEach(function(p){
+      p = p.replace(/\u0001/g, '.').trim();
+      if (!/[؀-ۿA-Za-z0-9]/.test(p)) return;
+      chunkLong(p, 180).forEach(function(c){ lineSents.push(c); });
+    });
+    var merged = [];
+    lineSents.forEach(function(s){
+      var last = merged[merged.length - 1];
+      if (last && (last.length < 40 || s.length < 25) && (last + ' ' + s).length <= 180) merged[merged.length - 1] = last + ' ' + s;
+      else merged.push(s);
+    });
+    var isHeading = merged.length === 1 && merged[0].length < 50 && !/[،,]/.test(merged[0]);
+    merged.forEach(function(s, i){
+      if (out.length) {
+        var prev = out[out.length - 1];
+        prev.pause = newPage && i === 0 ? 0.35 : (i === 0 ? (prev.heading ? 0.2 : 0.06) : 0);
+      }
+      out.push({ t: s, say: speakable(s), page: page || 1, ln: ln, pause: 0.6, heading: isHeading && i === 0 });
+      if (i === 0) newPage = false;
+    });
+  });
+  return out;
+}
+
+/* ---------- reading ---------- */
+var audio = new Audio();
+audio.preservesPitch = true;
+audio.volume = clamp(+lsGet(VOL_KEY, 1), 0, 1);
+var waitTimer = null, recTimer = null, sleepTimer = null, sleepEnd = 0;
+function setPlaying(on){ document.body.classList.toggle('playing', !!on); }
+function pausePlayer(){
+  if (!P) return;
+  P.playing = false; audio.pause(); clearTimeout(waitTimer); setPlaying(false); ui();
+}
+async function openPlayer(item){
+  pausePlayer();
+  var st = await refreshStatus();
+  P = { item: item, sents: buildSents(item.text), idx: 0, playing: false, ready: [], durs: [], speed: lsGet(SPEED_KEY, 1), loop: false, startAt: 0, viewPage: 0 };
+  if (SPEEDS.indexOf(P.speed) < 0) P.speed = 1;
+  P.idx = clamp(item.pos || 0, 0, Math.max(0, P.sents.length - 1));
+  P.doc = item.id;
+  P.pages = []; P.sents.forEach(function(s){ if (P.pages.indexOf(s.page) < 0) P.pages.push(s.page); });
+  var note = item.note || '';
+  $('p-note').textContent = note; $('p-note').hidden = !note;
+  $('txt').value = item.text; $('edit-card').hidden = true; $('exp-note').textContent = '';
+  $('b-loop').setAttribute('aria-pressed', 'false');
+  showErr('p-err', st ? '' : 'الموقع مو شغّال. شغّل ملف «تشغيل همس» ثم حدّث الصفحة.');
+  buildSpeeds(); renderMarks(); show('player'); renderBook(true); ui();
+  await startRecording();
+  /* start reading right away, no button, no download */
+  if (P && P.item === item && st) { P.playing = true; playIdx(); }
+}
+async function startRecording(){
+  if (!P) return;
+  try {
+    var r = await postJSON('/api/record', { doc: P.doc, items: P.sents.map(function(s){ return s.say; }), pos: P.idx });
+    applyRec(r);
+  } catch (e) {}
+  clearInterval(recTimer);
+  recTimer = setInterval(pollRec, 2500);
+}
+async function pollRec(){
+  if (!P || S.view !== 'player') return;
+  try { applyRec(await (await api('/api/record/' + encodeURIComponent(P.doc))).json()); } catch (e) {}
+}
+function applyRec(r){
+  if (!P) return;
+  if (!r.active) { startRecording(); return; }
+  P.ready = r.ready || [];
+  var n = P.ready.filter(Boolean).length, tot = P.sents.length;
+  $('rec-txt').textContent = n >= tot ? 'الشريط جاهز كامل' : 'جهزت ' + toAr(n) + ' من ' + toAr(tot) + ' جملة';
+  if (r.error) showErr('p-err', 'تعذّر تجهيز الصوت. تأكد من اتصال الإنترنت، ونعيد المحاولة تلقائياً.'); else if ($('p-err').textContent.indexOf('الإنترنت') >= 0) showErr('p-err', '');
+}
+
+/* the open ledger: the current document page, split over the two paper pages */
+function renderBook(follow){
+  if (!P) return;
+  var pageNo = follow || !P.viewPage ? (P.sents[P.idx] || {}).page || 1 : P.viewPage;
+  P.viewPage = pageNo;
+  var idxs = [];
+  P.sents.forEach(function(s, i){ if (s.page === pageNo) idxs.push(i); });
+  var total = idxs.reduce(function(a, i){ return a + P.sents[i].t.length; }, 0), acc = 0, cut = idxs.length;
+  for (var k = 0; k < idxs.length; k++) { acc += P.sents[idxs[k]].t.length; if (acc >= total / 2 && k < idxs.length - 1) { cut = k + 1; break; } }
+  /* keep a line together on one paper page */
+  while (cut < idxs.length && cut > 0 && P.sents[idxs[cut]].ln === P.sents[idxs[cut - 1]].ln) cut++;
+  fillPage($('pg-r'), idxs.slice(0, cut), true);
+  fillPage($('pg-l'), idxs.slice(cut), false);
+  var pi = P.pages.indexOf(pageNo);
+  $('pg-lbl').textContent = 'الصفحة ' + toAr(pi + 1) + ' من ' + toAr(P.pages.length);
+  $('pg-prev').disabled = pi <= 0; $('pg-next').disabled = pi >= P.pages.length - 1;
+  markCur();
+}
+function fillPage(box, idxs, first){
+  box.textContent = '';
+  var para = null, lastLn = -1;
+  idxs.forEach(function(i, k){
+    var s = P.sents[i];
+    if (s.heading && (k === 0 || s.ln !== lastLn)) {
+      var h = document.createElement('h3'); h.className = 's'; h.dataset.i = i; h.textContent = s.t.replace(/[.:،]+$/, '');
+      h.addEventListener('click', function(){ jump(i, true); });
+      box.appendChild(h); lastLn = s.ln; para = null; return;
+    }
+    if (s.ln !== lastLn || !para) { para = document.createElement('p'); para.className = 'txt'; box.appendChild(para); lastLn = s.ln; }
+    var sp = document.createElement('span'); sp.className = 's'; sp.dataset.i = i; sp.textContent = s.t + ' ';
+    sp.addEventListener('click', function(){ jump(i, true); });
+    para.appendChild(sp);
+  });
+}
+function markCur(){
+  if (!P) return;
+  var marks = (P.item.marks || []);
+  document.querySelectorAll('#book .s').forEach(function(el){
+    var i = +el.dataset.i;
+    el.classList.toggle('cur', i === P.idx);
+    el.classList.toggle('done', i < P.idx);
+    el.classList.toggle('mark-b', marks.indexOf(i) >= 0);
+  });
+}
+function scrollCur(){
+  var el = document.querySelector('#book .s[data-i="' + P.idx + '"]');
+  if (!el) return;
+  var box = el.closest('.page');
+  box.scrollTop = Math.max(0, el.offsetTop - box.clientHeight / 3);
+}
+$('pg-prev').addEventListener('click', function(){ var i = P.pages.indexOf(P.viewPage); if (i > 0) { P.viewPage = P.pages[i - 1]; renderBook(false); } });
+$('pg-next').addEventListener('click', function(){ var i = P.pages.indexOf(P.viewPage); if (i < P.pages.length - 1) { P.viewPage = P.pages[i + 1]; renderBook(false); } });
+
+function buildSpeeds(){
+  var box = $('speeds'); box.textContent = '';
+  SPEEDS.forEach(function(v){
+    var b = document.createElement('button'); b.type = 'button';
+    b.textContent = toAr(String(v)).replace('.', '٫') + '×';
+    b.setAttribute('aria-pressed', String(v === P.speed));
+    b.addEventListener('click', function(){
+      P.speed = v; lsSet(SPEED_KEY, v); audio.playbackRate = v;
+      Array.prototype.forEach.call(box.children, function(x, i){ x.setAttribute('aria-pressed', String(SPEEDS[i] === v)); });
+      ui();
+    });
+    box.appendChild(b);
+  });
+}
+
+/* time model: each sentence's real length once loaded, an estimate before that */
+/* letters per second, learned from the sentences already loaded (Hamed reads about 9 to 10 a second) */
+function rate(){
+  var ch = 0, sec = 0;
+  for (var i = 0; i < P.durs.length; i++) if (P.durs[i]) { ch += P.sents[i].say.length; sec += P.durs[i]; }
+  return sec > 5 ? ch / sec : 9.5;
+}
+function estDur(i){ return P.durs[i] || Math.max(1, P.sents[i].say.length / rate()); }
+function startOf(i){ var t = 0; for (var k = 0; k < i; k++) t += estDur(k) + P.sents[k].pause; return t; }
+function totalDur(){ return startOf(P.sents.length); }
+function curTime(){ return startOf(P.idx) + (audio.src && audio.dataset.i === String(P.idx) ? audio.currentTime || 0 : 0); }
+function ui(){
+  if (!P || S.view !== 'player') return;
+  var n = P.sents.length, tot = totalDur(), cur = curTime();
+  $('t-cur').textContent = fmt(cur / P.speed);
+  $('t-tot').textContent = fmt(tot / P.speed);
+  if (!seeking) $('seek').value = String(tot ? Math.round(cur / tot * 1000) : 0);
+  $('ic-play').innerHTML = P.playing ? PAUSE_SVG : PLAY_SVG;
+  if (n) {
+    var s = P.sents[Math.min(P.idx, n - 1)];
+    if ($('now-text').textContent !== s.t) $('now-text').textContent = s.t;
+    $('now-page').textContent = P.item.name + ' · الصفحة ' + toAr(P.pages.indexOf(s.page) + 1);
+    $('t-pos').textContent = 'الجملة ' + toAr(P.idx + 1) + ' من ' + toAr(n);
+  }
+  if (sleepEnd) {
+    var left = Math.max(0, Math.round((sleepEnd - Date.now()) / 60000));
+    $('sleep-lbl').textContent = 'يتوقف بعد ' + toAr(left || 1) + ' د';
+  } else $('sleep-lbl').textContent = 'إيقاف بعد';
+}
+setInterval(function(){ if (P && P.playing) ui(); }, 400);
+function savePos(){ if (P) { P.item.pos = P.idx; updateLib(P.item.id, { pos: P.idx }); } }
+
+/* audio of sentences already loaded in the page, so moving to the next one has no wait */
+var loaded = {};
+function sentenceUrl(i){
+  var key = P.doc + ':' + i;
+  if (!loaded[key]) {
+    var say = P.sents[i].say;
+    loaded[key] = api('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: say }) })
+      .then(function(r){ return r.blob(); })
+      .then(function(b){ return URL.createObjectURL(b); })
+      .catch(function(e){ delete loaded[key]; throw e; });
+  }
+  return loaded[key];
+}
+function prefetch(i){ if (P && i < P.sents.length) sentenceUrl(i).catch(function(){}); }
+function dropOld(cur){
+  Object.keys(loaded).forEach(function(key){
+    var parts = key.split(':'), i = +parts[parts.length - 1], doc = parts.slice(0, -1).join(':');
+    if (doc !== P.doc || i < cur - 2 || i > cur + 3) { var pr = loaded[key]; delete loaded[key]; pr.then(function(u){ setTimeout(function(){ URL.revokeObjectURL(u); }, 3000); }).catch(function(){}); }
+  });
+}
+async function playIdx(){
+  if (!P || !P.playing) return;
+  clearTimeout(waitTimer);
+  if (P.idx >= P.sents.length) { P.playing = false; P.idx = 0; setPlaying(false); savePos(); renderBook(true); ui(); return; }
+  var my = P.idx, doc = P.doc;
+  postJSON('/api/record/pos', { doc: P.doc, pos: P.idx }).catch(function(){});
+  if (P.sents[my].page !== P.viewPage) renderBook(true); else markCur();
+  scrollCur(); savePos(); ui(); setPlaying(true);
+  $('buffering').hidden = true;
+  var slow = setTimeout(function(){ if (P && P.idx === my) $('buffering').hidden = false; }, 1200);
+  try {
+    var url = await sentenceUrl(my);
+    clearTimeout(slow); $('buffering').hidden = true;
+    if (!P || !P.playing || P.idx !== my || P.doc !== doc) return;
+    audio.dataset.i = String(my);
+    audio.src = url; audio.playbackRate = P.speed;
+    var startAt = P.startAt; P.startAt = 0;
+    audio.onloadedmetadata = function(){
+      P.durs[my] = audio.duration;
+      if (startAt > 0 && startAt < audio.duration) audio.currentTime = startAt;
+    };
+    prefetch(my + 1); prefetch(my + 2);
+    dropOld(my);
+    audio.onended = function(){
+      if (!P || !P.playing || P.idx !== my) return;
+      if (P.loop) { audio.currentTime = 0; audio.play(); return; }
+      var gap = P.sents[my].pause * 1000 / P.speed;
+      if (gap <= 0) { P.idx++; playIdx(); return; }
+      waitTimer = setTimeout(function(){ if (P && P.playing && P.idx === my) { P.idx++; playIdx(); } }, gap);
+    };
+    await audio.play();
+  } catch (e) {
+    clearTimeout(slow);
+    showErr('p-err', 'تعذّر تجهيز الصوت. تأكد من اتصال الإنترنت، ونعيد المحاولة تلقائياً.');
+    waitTimer = setTimeout(function(){ if (P && P.playing && P.idx === my) { showErr('p-err', ''); playIdx(); } }, 3000);
+  }
+}
+function togglePlay(){
+  if (!P) return;
+  showErr('p-err', '');
+  if (P.playing) { P.playing = false; audio.pause(); clearTimeout(waitTimer); setPlaying(false); $('buffering').hidden = true; ui(); return; }
+  P.playing = true; setPlaying(true);
+  if (audio.src && !audio.ended && audio.currentTime > 0 && audio.dataset.i === String(P.idx)) { audio.play(); ui(); return; }
+  playIdx();
+}
+function jump(i, play, at){
+  if (!P) return;
+  P.idx = clamp(i, 0, P.sents.length - 1); P.startAt = at || 0;
+  audio.pause(); audio.removeAttribute('src'); delete audio.dataset.i; clearTimeout(waitTimer);
+  if (play) P.playing = true;
+  if (P.playing) playIdx(); else { postJSON('/api/record/pos', { doc: P.doc, pos: P.idx }).catch(function(){}); savePos(); renderBook(true); scrollCur(); ui(); }
+}
+/* move to any point in time (seconds of the whole notebook) */
+function seekTime(t){
+  if (!P) return;
+  t = clamp(t, 0, Math.max(0, totalDur() - 0.1));
+  var k = 0, start = 0;
+  while (k < P.sents.length - 1 && start + estDur(k) + P.sents[k].pause <= t) { start += estDur(k) + P.sents[k].pause; k++; }
+  var off = Math.max(0, t - start);
+  if (k === P.idx && audio.src && audio.dataset.i === String(k)) { audio.currentTime = Math.min(off, (audio.duration || off + 1) - 0.05); ui(); return; }
+  jump(k, false, off);
+}
+function skip(sec){ if (P) seekTime(curTime() + sec * P.speed); }
+$('b-play').addEventListener('click', togglePlay);
+$('b-fwd').addEventListener('click', function(){ skip(10); });
+$('b-back').addEventListener('click', function(){ skip(-10); });
+$('b-next').addEventListener('click', function(){ jump(P.idx + 1); });
+$('b-prev').addEventListener('click', function(){ jump(P.idx - 1); });
+var seeking = false;
+$('seek').addEventListener('input', function(){ seeking = true; if (P) $('t-cur').textContent = fmt(totalDur() * $('seek').value / 1000 / P.speed); });
+$('seek').addEventListener('change', function(){ seeking = false; if (P) seekTime(totalDur() * $('seek').value / 1000); });
+document.addEventListener('keydown', function(e){
+  if (S.view !== 'player' || /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+  if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
+  else if (e.code === 'ArrowLeft') { e.preventDefault(); skip(-10); }
+  else if (e.code === 'ArrowRight') { e.preventDefault(); skip(10); }
+});
+
+/* volume */
+$('vol').value = String(audio.volume);
+$('vol').addEventListener('input', function(){ audio.volume = +$('vol').value; lsSet(VOL_KEY, audio.volume); });
+/* repeat the current sentence */
+$('b-loop').addEventListener('click', function(){ if (!P) return; P.loop = !P.loop; $('b-loop').setAttribute('aria-pressed', String(P.loop)); });
+/* stop reading after some minutes */
+document.querySelectorAll('[data-sleep]').forEach(function(b){
+  b.addEventListener('click', function(){
+    var m = +b.dataset.sleep;
+    document.querySelectorAll('[data-sleep]').forEach(function(x){ x.setAttribute('aria-pressed', String(x === b)); });
+    clearTimeout(sleepTimer); sleepEnd = 0;
+    if (m) {
+      sleepEnd = Date.now() + m * 60000;
+      sleepTimer = setTimeout(function(){
+        sleepEnd = 0; if (P && P.playing) togglePlay();
+        document.querySelectorAll('[data-sleep]').forEach(function(x){ x.setAttribute('aria-pressed', String(x.dataset.sleep === '0')); });
+        ui();
+      }, m * 60000);
+    }
+    ui();
+  });
+});
+/* bookmarks: save a spot and come back to it */
+function renderMarks(){
+  var box = $('marks'); box.textContent = '';
+  (P.item.marks || []).forEach(function(i){
+    if (i >= P.sents.length) return;
+    var c = document.createElement('span'); c.className = 'markchip';
+    var go = document.createElement('button'); go.type = 'button'; go.style.width = 'auto'; go.style.borderRadius = '999px'; go.style.padding = '0 4px';
+    go.textContent = '★ ' + P.sents[i].t.slice(0, 28) + (P.sents[i].t.length > 28 ? '…' : '');
+    go.addEventListener('click', function(){ jump(i, true); });
+    var x = document.createElement('button'); x.type = 'button'; x.textContent = '×'; x.setAttribute('aria-label', 'حذف العلامة');
+    x.addEventListener('click', function(){
+      P.item.marks = (P.item.marks || []).filter(function(v){ return v !== i; });
+      updateLib(P.item.id, { marks: P.item.marks }); renderMarks(); markCur();
+    });
+    c.appendChild(go); c.appendChild(x); box.appendChild(c);
+  });
+}
+$('b-mark').addEventListener('click', function(){
+  if (!P) return;
+  var m = P.item.marks || [];
+  if (m.indexOf(P.idx) < 0) { m.push(P.idx); m.sort(function(a, b){ return a - b; }); }
+  P.item.marks = m; updateLib(P.item.id, { marks: m }); renderMarks(); markCur();
+});
+
+/* edit */
+$('edit-toggle').addEventListener('click', function(){ $('edit-card').hidden = !$('edit-card').hidden; });
+$('apply-txt').addEventListener('click', function(){
+  if (!P) return;
+  var t = $('txt').value; P.item.text = t; P.item.marks = []; updateLib(P.item.id, { text: t, pos: 0, marks: [] }); P.item.pos = 0;
+  openPlayer(P.item);
+});
+
+/* save the tape (download the whole reading as one audio file) */
+$('export').addEventListener('click', async function(){
+  if (!P) return;
+  var btn = $('export'); btn.disabled = true;
+  try {
+    var r = await postJSON('/api/export', { name: P.item.name, items: P.sents.map(function(s){ return { say: s.say, pause: s.pause }; }) });
+    while (true) {
+      await sleep(1000);
+      var j = await (await api('/api/jobs/' + r.job)).json();
+      $('exp-note').textContent = j.status === 'running' ? 'نجهّز الشريط… ' + toAr(Math.round(j.progress * 100)) + '٪' : '';
+      if (j.status === 'done') {
+        var a = document.createElement('a'); a.href = '/api/exports/' + encodeURIComponent(j.result.file); a.download = j.result.file;
+        document.body.appendChild(a); a.click(); a.remove();
+        $('exp-note').textContent = 'تم حفظ الشريط.'; break;
+      }
+      if (j.status === 'error') { $('exp-note').textContent = 'تعذّر حفظ الشريط.'; break; }
+    }
+  } catch (e) { $('exp-note').textContent = 'تعذّر حفظ الشريط.'; }
+  btn.disabled = false;
+});
+
+window.__dafter = { speakable: speakable, buildSents: buildSents };
+setMode('doc');
+show(lsGet(LIB_KEY, []).length ? 'library' : 'home');
+})();
+</script>
+</body>
+</html>
