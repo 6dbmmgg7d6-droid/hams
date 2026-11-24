@@ -149,6 +149,80 @@ def has_ocr():
         return False
 
 
+def tess_ok():
+    return bool(shutil.which("tesseract"))
+
+
+def tess_ocr(path):
+    """Free text recognizer that runs on the server itself (no outside service): fine for printed pages, weak on handwriting."""
+    try:
+        r = subprocess.run(["tesseract", str(path), "-", "-l", "ara+eng", "--psm", "3"], capture_output=True, text=True, timeout=180)
+        return r.stdout
+    except Exception:
+        return ""
+
+
+DOC_OCR_RULES = """أنت قارئ محترف يجهّز نص صفحات ليُقرأ بصوت بشري لمستمع لا يرى الصفحة.
+النص التالي مستخرج آلياً من صور الصفحات بقارئ نصوص، ففيه أخطاء في الحروف والأرقام ورموز زائدة، وقد تتداخل أعمدة الجداول أو يختلف ترتيبها.
+المطلوب لكل صفحة:
+1. صحّح الكلمات الخاطئة بحسب السياق، واحذف الرموز والحروف الزائدة التي لا معنى لها، ولا تخترع معلومة غير موجودة، ولا تخمّن رقماً غير واضح.
+2. اقرأ المستند العربي من اليمين لليسار صفاً صفاً، ورتّب الكلام ترتيباً منطقياً مفهوماً بالسماع. حوّل الجداول إلى جمل كاملة: اسم البند ثم قيمته.
+3. كل سطر جملة واحدة تامة تنتهي بنقطة. العنوان البارز فقط يبدأ بالعلامة # ثم مسافة.
+4. اكتب الرموز كلمات (% = بالمئة، - بين رقمين = إلى). الأرقام تبقى أرقاماً.
+5. تجاهل أرقام الصفحات المنفردة والترويسات المتكررة.
+صيغة الإخراج: لكل صفحة سطر === الصفحة N === ثم نصها، بلا أي مقدمة أو شرح."""
+
+
+def ocr_then_groq(job, pages, n):
+    """Plan B for files when Google's assistant is busy: read each page on the server, then let Groq fix and arrange it."""
+    from concurrent.futures import ThreadPoolExecutor
+    texts, done = {}, [0]
+
+    def read(p):
+        t = local_clean(norm_ar(tess_ocr(p["path"]))).strip()
+        done[0] += 1
+        job["stage"] = f"نقرأ الصفحات بطريقة بديلة ({done[0]} من {n})"
+        job["progress"] = 0.15 + 0.55 * done[0] / n
+        return p["n"], t
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        for k, t in ex.map(read, pages):
+            if t:
+                texts[k] = t
+    if not texts:
+        raise RuntimeError("empty")
+    groups, cur, size = [], [], 0
+    for k in sorted(texts):
+        if cur and size + len(texts[k]) > 1800:
+            groups.append(cur)
+            cur, size = [], 0
+        cur.append(k)
+        size += len(texts[k])
+    if cur:
+        groups.append(cur)
+    out = {}
+    job["stage"] = "نرتّب الصفحات…"
+
+    def arrange(g):
+        body = "\n\n".join(f"=== الصفحة {k} ===\n{texts[k]}" for k in g)
+        prompt = (DOC_OCR_RULES + "\n\n" + body)
+        try:
+            return {x["n"]: x for x in parse_pages(groq_chat(prompt, budget=240, max_tokens=min(5000, 600 + len(body))), g)
+                    if x["n"] in g and x["text"].strip()}
+        except ClaudeUnavailable as e:
+            alog(f"[groq-chat] pages {g[0]}-{g[-1]} not arranged: {e!r}"[:160])
+            return {}
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        for got in ex.map(arrange, groups):
+            out.update(got)
+    arranged = len(out)
+    for k in sorted(texts):
+        if k not in out:
+            out[k] = {"n": k, "text": texts[k]}
+    return [out[k] for k in sorted(out)], arranged
+
+
 def ocr_image(path):
     """macOS built-in text recognition (Arabic + English), lines in reading order."""
     try:
@@ -395,7 +469,7 @@ def prepare_worker(job, src: Path, name: str, use_claude: bool):
                         parts.append("\nللمساعدة فقط: هذا النص المستخرج آلياً من نفس الصفحة (قد يكون ترتيبه أو اتجاهه خاطئاً، والمرجع هو الصورة؛ استفد منه في دقة الأرقام والإملاء):")
                         parts.append(f"=== نص آلي للصفحة {p['n']} ===\n{p['raw'][:6000]}")
                     prompt = "\n".join(parts)
-                    out = ask_gemini(prompt, work / p["img"]) if GEMINI_KEY else run_claude(prompt, work, job)
+                    out = ask_gemini(prompt, work / p["img"], **QUICK) if GEMINI_KEY else run_claude(prompt, work, job)
                     got = parse_pages(out, [p["n"]])
                     if not got:
                         raise ClaudeUnavailable("empty")
@@ -406,6 +480,8 @@ def prepare_worker(job, src: Path, name: str, use_claude: bool):
                 # small files: split into up to 3 requests that run at once (faster); big files: 8 pages per request
                 # (a 27-page file = 4 requests, so Google's per-minute and daily free limits are not hit)
                 GEMINI_BATCH = max(1, min(8, -(-len(pages) // 3)))
+                # with a plan B ready, Google gets one quick try instead of waiting through its busy spells
+                QUICK = dict(budget=120, rounds=1, retry_busy=False) if (GROQ_KEY and tess_ok() and not has_ocr()) else {}
 
                 def page_block(batch):
                     nums = [p["n"] for p in batch]
@@ -416,7 +492,7 @@ def prepare_worker(job, src: Path, name: str, use_claude: bool):
                     for p in batch:
                         if p["raw"]:
                             parts.append(f"\nللمساعدة فقط، نص آلي للصفحة {p['n']} (قد يكون ترتيبه خاطئاً، والمرجع هو الصورة):\n{p['raw'][:4000]}")
-                    out = ask_gemini("\n".join(parts), image_paths=[work / p["img"] for p in batch])
+                    out = ask_gemini("\n".join(parts), image_paths=[work / p["img"] for p in batch], **QUICK)
                     got = {g["n"]: g for g in parse_pages(out, nums) if g["n"] in nums and g["text"].strip()}
                     for p in batch:  # a page that came back missing or empty is read again, alone
                         if p["n"] not in got:
@@ -454,12 +530,25 @@ def prepare_worker(job, src: Path, name: str, use_claude: bool):
                 print("[assistant]", repr(e)[:300], flush=True)
                 LAST_AI_ERROR[0] = re.sub(r"(key=|AIza|AQ\.)[\w.-]+", "***", repr(e))[:300]
                 if GEMINI_KEY and not has_ocr():
-                    # online there is no reliable way to read the page images without the assistant, and a PDF's own
-                    # text layer often comes out reversed with missing letters: say so clearly instead of reading nonsense
-                    raise RuntimeError("ai_busy")
-                note = "تعذّر التجهيز الذكي هذه المرة، فقُرئت الصفحات كما هي." if GEMINI_KEY else ("Claude غير مربوط في هذا الجهاز، فقُرئت الصفحات كما هي بدون تجهيز محاسبي للجداول والقيود. "
-                        "شغّل ملف «ربط Claude» مرة واحدة ثم أعد التحويل للحصول على أفضل قراءة.") if str(e) in ("login", "not_found") else \
-                       "تعذّر التجهيز عن طريق Claude هذه المرة، فقُرئت الصفحات كما هي."
+                    if not (GROQ_KEY and tess_ok()):
+                        # no reliable way to read the page images here, and a PDF's own text layer often comes out
+                        # reversed with missing letters: say so clearly instead of reading nonsense
+                        raise RuntimeError("ai_busy")
+                    for p in pages:
+                        p["path"] = work / p["img"]
+                    result, arranged = ocr_then_groq(job, pages, n)
+                    note = ("المساعد الأساسي كان زحمة، فقرأنا الملف بطريقة بديلة. الكلام المطبوع يكون جيد، "
+                            "بس الجداول وخط اليد ممكن تكون أقل دقة. تقدر تعيد التجهيز بعد شوي للحصول على أفضل قراءة.")
+                    if not arranged:
+                        note = "المساعد الذكي كان زحمة، فقرأنا الصفحات بدون ترتيب. أعد التجهيز بعد شوي للحصول على أفضل قراءة."
+                    engine = "ocr"
+                    pages_to_do = []
+                    if not result:
+                        raise RuntimeError("empty")
+                else:
+                    note = "تعذّر التجهيز الذكي هذه المرة، فقُرئت الصفحات كما هي." if GEMINI_KEY else ("Claude غير مربوط في هذا الجهاز، فقُرئت الصفحات كما هي بدون تجهيز محاسبي للجداول والقيود. "
+                            "شغّل ملف «ربط Claude» مرة واحدة ثم أعد التحويل للحصول على أفضل قراءة.") if str(e) in ("login", "not_found") else \
+                           "تعذّر التجهيز عن طريق Claude هذه المرة، فقُرئت الصفحات كما هي."
         if not result:
             # Local reading: the PDF text layer often comes out reversed or with broken Arabic letters,
             # so each page is read from its image with the Mac's own text recognition instead.
@@ -797,7 +886,7 @@ def groq_chat(prompt, budget=90, max_tokens=8000, effort="low"):
                 wait = _reset_secs(r.headers.get("retry-after", "")) or _reset_secs(r.headers.get("x-ratelimit-reset-tokens", "")) or 15
                 GROQ_REST[model] = time.time() + min(wait, 70) + 0.5
             elif r.status_code == 413:
-                raise ClaudeUnavailable("too_big")
+                GROQ_REST[model] = time.time() + 20
             else:
                 GROQ_REST[model] = time.time() + 5
         soonest = min([GROQ_REST.get(m, 0) for m in GROQ_CHAT_MODELS])
@@ -829,7 +918,7 @@ def groq_tidy(style, lang, raw, dur, job=None):
             prompt += (f"\n\nهذا هو الجزء {k + 1} من {n} من نفس التسجيل: اكتب هذا الجزء فقط، "
                        + ("" if k == 0 else "ولا تبدأ بمقدمة، وضع عنواناً فقط إذا بدأ موضوع جديد فعلاً."))
         # more «thinking» understands the dialect better; on long recordings less, to stay inside the per-minute limit
-        return parse_voice(groq_chat(prompt, budget=max(60, 25 * n), effort="medium" if n <= 2 else "low"), dur)
+        return parse_voice(groq_chat(prompt, budget=max(60, 25 * n), max_tokens=5000, effort="medium" if n <= 2 else "low"), dur)
 
     with ThreadPoolExecutor(max_workers=min(3, n)) as ex:
         parts = list(ex.map(one, range(n)))
