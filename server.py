@@ -1331,14 +1331,15 @@ def condense(segs, style):
         prompt = CONDENSE_PROMPT.format(how=how) + "\n".join(f"{n + 1}| {segs[i]['x']}" for n, i in enumerate(g))
         try:  # the big assistant writes clearly; the second one only if its daily limit is used up
             txt = smart_chat(prompt, budget=90, max_tokens=7000, effort="medium")
+            alog(f"[condense] answer starts: {txt[:120]!r}")
         except ClaudeUnavailable as e:
             alog(f"[groq-chat] condense skipped: {e!r}"[:160])
             return {}
         got = {}
         for line in txt.splitlines():
-            m = re.match(r"^\s*(\d+)\s*[|｜:.)-]\s*(.*)$", line.strip())
+            m = re.match(r"^\W*(\d+)\W*?\s*[|｜:.)\-–]\s*(.*)$", line.strip())
             if m and 0 <= int(m.group(1)) - 1 < len(g):
-                got[g[int(m.group(1)) - 1]] = HARAKAT.sub("", m.group(2)).strip()
+                got[g[int(m.group(1)) - 1]] = HARAKAT.sub("", m.group(2)).strip().strip("*").strip()
         return got
 
     out = {}
@@ -1357,7 +1358,8 @@ def condense(segs, style):
         said = set(_skeleton(x["x"]))
         nw = _skeleton(new or "")
         foreign = [w for w in nw if w not in said and w.lstrip("وفبل") not in said]
-        if not nw or len(foreign) > max(2, int(len(nw) * 0.3)):  # nothing back, or a new story: keep the tidy paragraph
+        if not nw or len(foreign) > max(3, int(len(nw) * 0.5)):  # nothing back, or a new story: keep the tidy paragraph
+            alog(f"[condense] paragraph {i} kept as is ({'nothing back' if not nw else f'{len(foreign)}/{len(nw)} new words'})")
             new = x["x"]
         new = _drop_praise(new)
         words = re.findall(r"[\u0621-\u064A]+", new)
