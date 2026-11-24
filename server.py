@@ -239,6 +239,15 @@ def gemini_models():
     return lst
 
 
+ASSIST_LOG = []
+
+
+def alog(msg):
+    print(msg, flush=True)
+    ASSIST_LOG.append(time.strftime("%H:%M:%S ") + msg)
+    del ASSIST_LOG[:-30]
+
+
 def ask_gemini(prompt, image_path=None, image_paths=None):
     """One request to Google's free Gemini assistant; tries the next model name if one is unknown,
     and waits a little when the free limit is hit for a moment."""
@@ -265,10 +274,10 @@ def ask_gemini(prompt, image_path=None, image_paths=None):
                                   headers={"x-goog-api-key": GEMINI_KEY}, json=body_for(model, levels[0]),
                                   timeout=(10, 120 if "lite" in model else 75))
             except requests.exceptions.Timeout:
-                print(f"[assistant] {model} too slow ({time.time() - t0:.0f}s): next version", flush=True)
+                alog(f"[assistant] {model} too slow ({time.time() - t0:.0f}s): next version")
                 last = "timeout"
                 break
-            print(f"[assistant] {model} {r.status_code} in {time.time() - t0:.0f}s ({levels[0]})", flush=True)
+            alog(f"[assistant] {model} {r.status_code} in {time.time() - t0:.0f}s ({levels[0]})")
             if r.status_code == 400 and levels[0] and "think" in r.text.lower():
                 levels.pop(0)  # this version doesn't accept that setting: ask again with the next one
                 continue
@@ -627,7 +636,7 @@ def tts(body: TTSIn):
 @app.get("/api/status")
 def status():
     # says only whether a Google key is set (never the key itself), and the last assistant error if any
-    return {"ok": True, "claude": bool(find_claude()), "gemini_key": bool(GEMINI_KEY), "assistant_error": LAST_AI_ERROR[0]}
+    return {"ok": True, "claude": bool(find_claude()), "gemini_key": bool(GEMINI_KEY), "assistant_error": LAST_AI_ERROR[0], "assistant_log": ASSIST_LOG[-15:], "models": _MODEL_CACHE["list"][:6]}
 
 
 # ---------------------------------------------------------------- background recording
