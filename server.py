@@ -249,22 +249,28 @@ def ask_gemini(prompt, image_path=None, image_paths=None):
     for ip in ([image_path] if image_path else []) + list(image_paths or []):
         mime = "image/png" if str(ip).lower().endswith(".png") else "image/jpeg"
         parts.append({"inline_data": {"mime_type": mime, "data": base64.b64encode(Path(ip).read_bytes()).decode()}})
-    def body_for(model, think):
+    def body_for(model, level):
         cfg = {"temperature": 0.2}
-        if think:  # reading and arranging text needs little «thinking»; skipping it makes the answer much faster
-            cfg["thinkingConfig"] = {"thinkingBudget": 0} if model.startswith("gemini-2") else {"thinkingLevel": "low"}
+        if level:  # reading and arranging text needs almost no «thinking»; skipping it makes the answer much faster
+            cfg["thinkingConfig"] = {"thinkingBudget": 0} if model.startswith("gemini-2") else {"thinkingLevel": level}
         return {"contents": [{"role": "user", "parts": parts}], "generationConfig": cfg}
 
     last = None
     for model in gemini_models():
-        think = True
-        for attempt in range(5):
+        levels = ["minimal", "low", None]  # least thinking first; step down only if this version refuses the setting
+        for attempt in range(6):
             t0 = time.time()
-            r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                              headers={"x-goog-api-key": GEMINI_KEY}, json=body_for(model, think), timeout=240)
-            print(f"[assistant] {model} {r.status_code} in {time.time() - t0:.0f}s", flush=True)
-            if r.status_code == 400 and think and "think" in r.text.lower():
-                think = False  # this version doesn't accept the setting: ask again the normal way
+            try:  # a version that is slow today is skipped instead of making the reader wait minutes
+                r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                                  headers={"x-goog-api-key": GEMINI_KEY}, json=body_for(model, levels[0]),
+                                  timeout=(10, 120 if "lite" in model else 75))
+            except requests.exceptions.Timeout:
+                print(f"[assistant] {model} too slow ({time.time() - t0:.0f}s): next version", flush=True)
+                last = "timeout"
+                break
+            print(f"[assistant] {model} {r.status_code} in {time.time() - t0:.0f}s ({levels[0]})", flush=True)
+            if r.status_code == 400 and levels[0] and "think" in r.text.lower():
+                levels.pop(0)  # this version doesn't accept that setting: ask again with the next one
                 continue
             if r.status_code == 404:
                 last = f"model {model} not found"
