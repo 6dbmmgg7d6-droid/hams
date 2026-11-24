@@ -140,6 +140,14 @@ def page_text(page):
     return norm_ar(page.get_text("text", sort=True)).strip()
 
 
+def has_ocr():
+    try:
+        import Vision  # noqa: F401  (only on the Mac)
+        return True
+    except Exception:
+        return False
+
+
 def ocr_image(path):
     """macOS built-in text recognition (Arabic + English), lines in reading order."""
     try:
@@ -283,10 +291,19 @@ def ask_gemini(prompt, image_path=None, image_paths=None):
                 levels.pop(0)  # this version doesn't accept that setting: ask again with the next one
                 continue
             if r.status_code == 404:
+                EXHAUSTED[model] = time.time() + 86400  # this version no longer exists: stop asking it
                 return (f"model {model} not found", False)
             if r.status_code == 429:
-                EXHAUSTED[model] = time.time() + 600  # free limit used up: skip it for 10 minutes
-                return ("limit 429", False)
+                body = r.text
+                if "PerDay" in body or "per day" in body.lower():
+                    EXHAUSTED[model] = time.time() + 3 * 3600  # today's free limit is used up: skip it for hours
+                    alog(f"[assistant] {model}: daily limit used up")
+                    return ("daily limit", False)
+                m = re.search(r'"retryDelay":\s*"(\d+)', body)
+                wait = min(int(m.group(1)) if m else 15, 40)
+                EXHAUSTED[model] = time.time() + wait  # too many requests this minute: rest it a few seconds
+                alog(f"[assistant] {model}: per-minute limit, rest {wait}s | {body[:160]!r}")
+                return ("minute limit", True)
             if r.status_code in (500, 503):
                 last = f"busy {r.status_code}"
                 if attempt >= 1:
@@ -301,22 +318,25 @@ def ask_gemini(prompt, image_path=None, image_paths=None):
                 return ("empty", True)
         return (last, True)
 
-    last = None
-    for rnd in range(3):  # Google sometimes says «busy» for every version at once: wait a little and go round again
-        if rnd:
-            alog(f"[assistant] all versions busy: waiting {10 * rnd}s, round {rnd + 1}")
-            time.sleep(10 * rnd)
-        busy = False
+    last = "no version available"
+    for rnd in range(4):  # Google sometimes says «busy» for every version at once: wait a little and go round again
+        busy, soonest = False, None
         for model in gemini_models():
-            if EXHAUSTED.get(model, 0) > time.time():
-                continue  # its free limit was used up recently: don't waste time asking again
+            until = EXHAUSTED.get(model, 0)
+            if until > time.time():  # resting (limit hit) or gone: don't waste time asking it now
+                if until - time.time() < 60:
+                    busy, soonest = True, min(soonest or until, until)
+                continue
             got = ask_model(model)
             if isinstance(got, str):
                 return got
             last, b = got
             busy = busy or b
-        if not busy:
+        if not busy or rnd == 3:
             break
+        wait = max(5, min(40, (soonest - time.time()) if soonest else 10 * (rnd + 1)))
+        alog(f"[assistant] all versions busy: waiting {wait:.0f}s, round {rnd + 2}")
+        time.sleep(wait)
     raise ClaudeUnavailable(f"gemini failed: {last}")
 
 
@@ -371,7 +391,9 @@ def prepare_worker(job, src: Path, name: str, use_claude: bool):
                         g["n"] = p["n"]
                     return got
 
-                GEMINI_BATCH = 1  # one page per request, all pages at once: the file is ready as fast as its slowest page
+                # small files: split into up to 3 requests that run at once (faster); big files: 8 pages per request
+                # (a 27-page file = 4 requests, so Google's per-minute and daily free limits are not hit)
+                GEMINI_BATCH = max(1, min(8, -(-len(pages) // 3)))
 
                 def page_block(batch):
                     nums = [p["n"] for p in batch]
@@ -393,7 +415,7 @@ def prepare_worker(job, src: Path, name: str, use_claude: bool):
                 if GEMINI_KEY:
                     batches = [pages[b:b + GEMINI_BATCH] for b in range(0, len(pages), GEMINI_BATCH)]
                     job["stage"] = f"المساعد الذكي يقرأ الصفحات ({n})"
-                    with ThreadPoolExecutor(max_workers=min(4, len(batches))) as ex:  # up to 4 pages at once
+                    with ThreadPoolExecutor(max_workers=min(3, len(batches))) as ex:  # up to 3 requests at once
                         futs = [ex.submit(page_block, b) for b in batches]
                         for k, f in enumerate(futs):
                             result.extend(f.result())
@@ -419,6 +441,10 @@ def prepare_worker(job, src: Path, name: str, use_claude: bool):
                 result = []
                 print("[assistant]", repr(e)[:300], flush=True)
                 LAST_AI_ERROR[0] = re.sub(r"(key=|AIza|AQ\.)[\w.-]+", "***", repr(e))[:300]
+                if GEMINI_KEY and not has_ocr():
+                    # online there is no reliable way to read the page images without the assistant, and a PDF's own
+                    # text layer often comes out reversed with missing letters: say so clearly instead of reading nonsense
+                    raise RuntimeError("ai_busy")
                 note = "تعذّر التجهيز الذكي هذه المرة، فقُرئت الصفحات كما هي." if GEMINI_KEY else ("Claude غير مربوط في هذا الجهاز، فقُرئت الصفحات كما هي بدون تجهيز محاسبي للجداول والقيود. "
                         "شغّل ملف «ربط Claude» مرة واحدة ثم أعد التحويل للحصول على أفضل قراءة.") if str(e) in ("login", "not_found") else \
                        "تعذّر التجهيز عن طريق Claude هذه المرة، فقُرئت الصفحات كما هي."
@@ -444,7 +470,7 @@ def prepare_worker(job, src: Path, name: str, use_claude: bool):
         job["status"] = "done"
     except Exception as e:
         job["status"] = "error"
-        job["error"] = str(e) if str(e) in ("cancelled", "bad_pdf", "empty", "timeout") else "failed"
+        job["error"] = str(e) if str(e) in ("cancelled", "bad_pdf", "empty", "timeout", "ai_busy") else "failed"
         job["detail"] = repr(e)[:400]
 
 
