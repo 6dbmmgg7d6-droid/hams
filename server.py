@@ -37,6 +37,7 @@ PARALLEL = 6  # sentences requested from the voice service at the same time
 # On the online server these come from its secret settings; on the Mac they are empty and nothing changes.
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODELS = [m for m in (os.environ.get("GEMINI_MODEL", ""), "gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash") if m]
+_MODEL_CACHE = {"at": 0, "list": []}
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "").strip()
 LAST_AI_ERROR = [""]
 
@@ -202,6 +203,38 @@ def parse_pages(text, nums):
     return [{"n": p["n"], "text": "\n".join(p["lines"]).strip()} for p in out if "\n".join(p["lines"]).strip()]
 
 
+def gemini_models():
+    """Ask Google which models this key can use right now (names change when old versions are retired),
+    and order them: newest regular «flash» first, then the lighter «flash-lite» ones."""
+    import requests
+
+    if _MODEL_CACHE["list"] and time.time() - _MODEL_CACHE["at"] < 3600:
+        return _MODEL_CACHE["list"]
+    found = []
+    try:
+        r = requests.get("https://generativelanguage.googleapis.com/v1beta/models", params={"pageSize": 200},
+                         headers={"x-goog-api-key": GEMINI_KEY}, timeout=30)
+        for m in r.json().get("models", []):
+            name = m.get("name", "").replace("models/", "")
+            if "generateContent" not in m.get("supportedGenerationMethods", []) or "flash" not in name:
+                continue
+            if any(w in name for w in ("image", "tts", "audio", "live", "embedding", "thinking", "exp")):
+                continue
+            found.append(name)
+    except Exception as e:
+        print("[assistant] could not list models:", repr(e)[:200], flush=True)
+
+    def rank(n):
+        ver = [int(x) for x in re.findall(r"\d+", n)[:2]] + [0, 0]
+        return ("lite" in n, "preview" in n, -ver[0], -ver[1], "latest" not in n, n)
+
+    found.sort(key=rank)
+    lst = list(dict.fromkeys([m for m in (os.environ.get("GEMINI_MODEL", ""),) if m] + found + GEMINI_MODELS))
+    _MODEL_CACHE.update(at=time.time(), list=lst)
+    print("[assistant] models:", ", ".join(lst[:6]), flush=True)
+    return lst
+
+
 def ask_gemini(prompt, image_path=None, image_paths=None):
     """One request to Google's free Gemini assistant; tries the next model name if one is unknown,
     and waits a little when the free limit is hit for a moment."""
@@ -214,12 +247,12 @@ def ask_gemini(prompt, image_path=None, image_paths=None):
         parts.append({"inline_data": {"mime_type": mime, "data": base64.b64encode(Path(ip).read_bytes()).decode()}})
     body = {"contents": [{"role": "user", "parts": parts}], "generationConfig": {"temperature": 0.2}}
     last = None
-    for model in GEMINI_MODELS:
+    for model in gemini_models():
         for attempt in range(4):
             r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                               headers={"x-goog-api-key": GEMINI_KEY}, json=body, timeout=180)  # works for old and new key formats
             if r.status_code == 404:
-                last = "model"
+                last = f"model {model} not found"
                 break
             if r.status_code in (429, 500, 503):
                 last = f"busy {r.status_code}"
