@@ -662,9 +662,8 @@ VOICE_STYLES = {
     "tidy": "مرتّب: اكتب كل ما قيل بنفس كلمات المتكلم وبنفس ترتيبه، واحذف فقط الحشو والتلعثم والتكرار (مثل: يعني، امم، إيه، اللي هو، "
             "والكلمة أو الجملة التي يعيدها المتكلم مرتين)، وضع علامات الترقيم (، . ؟ :) في مكانها. لا تلخّص ولا تعِد الصياغة ولا تحذف أي معلومة "
             "أو اسم أو حكم أو مثال أو رقم: النص المرتّب يكون قريباً جداً من طول الكلام الأصلي بعد حذف الحشو فقط.",
-    "short": "مختصر: مثل المرتّب، لكن اختصر كل فقرة إلى أهم ما فيها، مع الإبقاء على كل المعلومات المهمة والتعريفات والأرقام والأمثلة الأساسية.",
-    "summary": "مرتّب مع ملخص: ابدأ بعنوان «الملخص» وتحته من 5 إلى 10 نقاط قصيرة لأهم ما قيل، كل نقطة تبدأ بـ «- » ووقتها هو وقت أول ذكر لها، "
-               "ثم اكتب الكلام كاملاً مرتّباً: احذف الحشو والتلعثم والتكرار دون حذف أي معلومة.",
+    "short": "مختصر: نفس الكلام المرتّب بنفس الفقرات والعناوين وبكلمات المتكلم، لكن مختصر إلى نحو نصف طوله: احذف الحشو والتكرار وعبارات الحمد والدعاء المتكررة وقليل الفائدة، وأبقِ المعلومات المهمة. بدون نقاط.",
+    "summary": "مرتّب مع ملخص: نفس الكلام المرتّب بنفس الفقرات والعناوين وبكلمات المتكلم، لكن أقصر قليلاً (نحو ثلثي طوله): احذف الحشو والتكرار وعبارات الحمد والدعاء المتكررة وقليل الفائدة، وأبقِ كل معلومة مهمة. بدون نقاط.",
     "verbatim": "حرفي: اكتب كل كلمة كما قيلت بالضبط، بما فيها التكرار والحشو، وأضف علامات الترقيم فقط.",
 }
 VOICE_LANGS = {
@@ -1005,6 +1004,10 @@ SHAPE_PROMPT = """أمامك أسطر مرقّمة من تفريغ تسجيل ص
 HARAKAT = re.compile(r"[ً-ْٰ]")
 
 
+def _skeleton(t):
+    return [x for x in (_skeleton_word(w) for w in (t or "").split()) if x]
+
+
 def _skeleton_word(w):
     w = HARAKAT.sub("", w)
     w = re.sub("[أإآٱ]", "ا", w).replace("ة", "ه").replace("ى", "ي").replace("ؤ", "و").replace("ئ", "ي").replace("ـ", "")
@@ -1218,7 +1221,9 @@ def line_tidy(raw, style, accurate, budget, vocab=None, alts=None):
         txt = keep_words(heard, got[k], accurate) if k in got else heard
         if style != "verbatim":
             txt = drop_fillers(txt)
-        if not txt or not re.search(r"[؀-ۿA-Za-z0-9]", txt) or txt == last:
+        lw, tw = set(_skeleton(last)), _skeleton(txt)
+        short_repeat = 0 < len(tw) <= 4 and bool(lw) and all(w in lw or w.lstrip("وف") in lw for w in tw)  # «… إبراهيم الخليفي. إبراهيم الخليفي.»
+        if not txt or not re.search(r"[؀-ۿA-Za-z0-9]", txt) or txt == last or (style != "verbatim" and short_repeat):
             continue
         last = txt
         if k in heads:
@@ -1263,6 +1268,74 @@ def align_alt(raw, second):
     return [" ".join(v) for v in out]
 
 
+CONDENSE_PROMPT = """أمامك فقرات مرقّمة من تفريغ مرتّب لتسجيل صوتي باللهجة السعودية. أعد كتابة كل فقرة {how}، بنفس كلمات المتكلم ولهجته وبصيغة المتكلم نفسه.
+احذف: عبارات الحمد والتسبيح والدعاء المتكررة (مثل: اللهم لك الحمد، الحمد لله، سبحان الله، والله، الله يجزاك خير)، والكلام المكرر، والأسماء المكررة، والتحيات، والكلام قليل الفائدة.
+أبقِ كل معلومة مهمة كما هي: الأسماء، والملاحظات، والأحكام والتقييمات، والأسباب، والأيام والأرقام، والسور والأجزاء.
+ممنوع: إضافة معلومة، أو التحويل إلى نقاط، أو الكلام عن المتكلم بصيغة الغائب (لا تكتب: يتكلم عن، يذكر أن)، أو التحويل للفصحى.
+اكتب لكل فقرة رقمها ثم | ثم الفقرة المختصرة في سطر واحد. الفقرة التي كلها تحية أو دعاء أو شكر اكتب بعد رقمها: -
+لا تكتب أي شيء آخر.
+
+الفقرات:
+"""
+
+
+def condense(segs, style):
+    """«مرتّب مع ملخص» and «مختصر»: the same tidy text in the same order and headings, only shorter. A paragraph that
+    comes back with words that were never said stays as the tidy one."""
+    paras = [i for i, x in enumerate(segs) if not x["h"]]
+    if not paras:
+        return segs
+    how = "مختصرة إلى نحو نصف طولها أو أقل، مع الإبقاء على المعنى المهم فقط" if style == "short" else \
+        "أقصر قليلاً (نحو ثلثي طولها)، بحذف الحشو والتكرار وقليل الفائدة فقط"
+    out = {}
+    groups, cur, size = [], [], 0
+    for i in paras:
+        if cur and size + len(segs[i]["x"]) > 2400:
+            groups.append(cur)
+            cur, size = [], 0
+        cur.append(i)
+        size += len(segs[i]["x"])
+    if cur:
+        groups.append(cur)
+
+    def one(g):
+        prompt = CONDENSE_PROMPT.format(how=how) + "\n".join(f"{n + 1}| {segs[i]['x']}" for n, i in enumerate(g))
+        try:
+            txt = groq_chat(prompt, budget=90, max_tokens=4000, effort="low", models=["openai/gpt-oss-120b", "openai/gpt-oss-20b"])
+        except ClaudeUnavailable as e:
+            alog(f"[groq-chat] condense skipped: {e!r}"[:160])
+            return {}
+        got = {}
+        for line in txt.splitlines():
+            m = re.match(r"^\s*(\d+)\s*[|｜:.)-]\s*(.*)$", line.strip())
+            if m and 0 <= int(m.group(1)) - 1 < len(g):
+                got[g[int(m.group(1)) - 1]] = HARAKAT.sub("", m.group(2)).strip()
+        return got
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(2, len(groups))) as ex:
+        for got in ex.map(one, groups):
+            out.update(got)
+    res = []
+    for i, x in enumerate(segs):
+        if x["h"] or i not in out:
+            res.append(x)
+            continue
+        new = out[i]
+        if new in ("-", "—", ""):
+            continue  # only a greeting or thanks
+        said = set(_skeleton(x["x"]))
+        nw = _skeleton(new)
+        foreign = [w for w in nw if w not in said and w.lstrip("وفبل") not in said]
+        # a summary may use a few words of its own («البداية» for «أول مرة»), but not a new story
+        if not nw or len(foreign) > max(2, int(len(nw) * 0.25)):
+            res.append(x)
+        else:
+            res.append({"t": x["t"], "h": False, "x": new})
+    # a heading left with nothing under it goes too
+    return [x for k, x in enumerate(res) if not (x["h"] and (k + 1 >= len(res) or res[k + 1]["h"]))]
+
+
 def groq_tidy(style, lang, raw, dur, job=None, accurate=False, vocab=None, alts=None):
     """Tidy a long recording in pieces (each fits the per-minute limit), all at once; then a short summary if asked."""
     from concurrent.futures import ThreadPoolExecutor
@@ -1279,7 +1352,7 @@ def groq_tidy(style, lang, raw, dur, job=None, accurate=False, vocab=None, alts=
     if cur:
         chunks.append(cur)
         achunks.append(acur)
-    base_style = "tidy" if style == "summary" else style
+    base_style = "tidy" if style in ("summary", "short") else style  # a shorter text is made from the tidy one
     n = len(chunks)
 
     def one(k):
@@ -1301,18 +1374,8 @@ def groq_tidy(style, lang, raw, dur, job=None, accurate=False, vocab=None, alts=
     segs = [x for p in parts for x in p]
     if not segs:
         raise ClaudeUnavailable("empty")
-    if style == "summary":
-        body = "\n".join(f"[{fmt_ts(x['t'])}] " + ("# " if x["h"] else "") + x["x"][:220] for x in segs)[:9000]
-        try:
-            pts = parse_voice(groq_chat(
-                "هذا نص مرتب لمحاضرة، وكل سطر يبدأ بوقته. اكتب ملخصاً من 5 إلى 10 نقاط قصيرة لأهم ما قيل، "
-                "بنفس لغة النص ولهجته، كل نقطة في سطر بالشكل: [دقائق:ثواني] - النقطة، ووقتها هو وقت أول ذكر لها. "
-                "لا مقدمة ولا خاتمة.\n\n" + body, budget=60, max_tokens=2000), dur)
-            pts = [x for x in pts if not x["h"]]
-            if pts:
-                segs = [{"t": 0, "h": True, "x": "الملخص"}] + pts + segs
-        except ClaudeUnavailable as e:
-            alog(f"[groq-chat] summary skipped: {e!r}"[:200])
+    if style in ("summary", "short"):
+        segs = condense(segs, style)
     return segs
 
 
