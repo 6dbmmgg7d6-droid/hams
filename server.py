@@ -734,10 +734,21 @@ def parse_voice(out, dur):
     return segs
 
 
-def sm_transcribe(path, dur=0.0):
+LATIN_SAID = {"hello": "هلا", "hi": "هاي", "hey": "هاي", "ok": "أوكي", "okay": "أوكي", "bye": "باي", "yes": "يس", "no": "نو",
+              "thanks": "ثانكس", "sorry": "سوري", "please": "بليز", "wow": "واو"}
+
+
+def fix_latin(t):
+    """Words the recognizer wrote in English letters although they were said in Arabic speech (e.g. «هلا» → Hello)."""
+    return re.sub(r"[A-Za-z]+", lambda m: LATIN_SAID.get(m.group(0).lower(), m.group(0)), t)
+
+
+def sm_transcribe(path, dur=0.0, vocab=None):
     """Speechmatics: hears Saudi Arabic far better than the others. Returns [(start_seconds, sentence), ...]."""
     import requests
     cfg = {"type": "transcription", "transcription_config": {"language": "ar", "operating_point": "enhanced"}}
+    if vocab:  # the user's recurring words and names: the recognizer listens for them
+        cfg["transcription_config"]["additional_vocab"] = [{"content": w} for w in vocab[:500]]
     hdr = {"Authorization": f"Bearer {SM_KEY}"}
     t0 = time.time()
     with open(path, "rb") as fh:
@@ -775,6 +786,7 @@ def sm_transcribe(path, dur=0.0):
             cur, start = "", None
     if cur.strip():
         raw.append((start or 0.0, cur.strip()))
+    raw = [(t, fix_latin(x)) for t, x in raw]
     try:  # delete the recording from their side straight away
         requests.delete(f"{SM_URL}/jobs/{jid}", headers=hdr, timeout=15)
     except Exception:
@@ -905,12 +917,13 @@ def _reset_secs(v):
     return int(h or 0) * 3600 + int(mi or 0) * 60 + float(se or 0)
 
 
-def groq_chat(prompt, budget=90, max_tokens=8000, effort="low"):
+def groq_chat(prompt, budget=90, max_tokens=8000, effort="low", models=None):
     """Groq's free text assistants (very fast). Each has a small per-minute limit, so requests are spread over all of them."""
     import requests
     start, last = time.time(), "?"
+    order = models or GROQ_CHAT_MODELS
     while time.time() - start < budget:
-        for model in GROQ_CHAT_MODELS:
+        for model in order:
             if GROQ_REST.get(model, 0) > time.time():
                 continue
             body = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.2, "max_tokens": max_tokens}
@@ -946,7 +959,7 @@ def groq_chat(prompt, budget=90, max_tokens=8000, effort="low"):
                 GROQ_REST[model] = time.time() + 20
             else:
                 GROQ_REST[model] = time.time() + 5
-        soonest = min([GROQ_REST.get(m, 0) for m in GROQ_CHAT_MODELS])
+        soonest = min([GROQ_REST.get(m, 0) for m in order])
         pause = max(0.5, soonest - time.time())
         if time.time() - start + pause >= budget:
             break
@@ -957,7 +970,7 @@ def groq_chat(prompt, budget=90, max_tokens=8000, effort="low"):
 CLEAN_PROMPT = """أمامك أسطر مرقّمة من تفريغ {kind} لتسجيل صوتي باللهجة السعودية.
 لكل سطر اكتب رقمه ثم | ثم نفس كلمات السطر بالضبط وبنفس ترتيبها، مع تصحيح الإملاء والترقيم فقط:
 - الإملاء: التاء المربوطة في آخر الكلمة (ملاحظه ← ملاحظة)، والهمزات (اذكر ← أذكر، انه ← أنه، الى ← إلى)، والألف المقصورة.
-- الترقيم داخل السطر: فاصلة (،) بين الجمل المتصلة، و(؟) بعد السؤال، و(:) قبل كلام منقول. اترك علامة آخر السطر كما هي.
+- الترقيم: ضع (؟) بعد السؤال، و(:) قبل كلام منقول فقط. لا تضف فواصل ولا نقاط داخل السطر، واترك علامة آخر السطر كما هي.
 {fix}ممنوع: حذف أي كلمة أو تغييرها أو تبديلها بمرادف، وتحويل اللهجة للفصحى (اترك: هذي، أبيك، ما يجي، وحنا، شوي، إيه، اللي... كما هي)، وإضافة كلام أو تنوين أو تشكيل.
 لا تكتب أي شيء آخر غير الأسطر.
 
@@ -1015,7 +1028,7 @@ def drop_fillers(t):
     return t
 
 
-def line_tidy(raw, style, accurate, budget):
+def line_tidy(raw, style, accurate, budget, vocab=None):
     """The speaker's own words: one assistant only fixes spelling and punctuation, another only says where the headings,
     paragraphs and real sentence ends are. Both run at the same time."""
     from concurrent.futures import ThreadPoolExecutor
@@ -1027,7 +1040,9 @@ def line_tidy(raw, style, accurate, budget):
     def clean():
         got = {}
         try:
-            for line in groq_chat(clean_p, budget=budget, max_tokens=6000, effort="medium").splitlines():
+            # spelling needs the bigger assistant: it waits for it rather than taking the smaller one
+            for line in groq_chat(clean_p, budget=budget, max_tokens=6000, effort="medium",
+                                  models=["openai/gpt-oss-120b"]).splitlines():
                 m = re.match(r"^\s*\[?(\d+)\]?\s*[|｜:.)-]\s*(.*)$", line.strip())
                 if m and 0 <= int(m.group(1)) - 1 < len(raw):
                     got[int(m.group(1)) - 1] = m.group(2).strip()
@@ -1037,7 +1052,8 @@ def line_tidy(raw, style, accurate, budget):
 
     def shape():
         try:
-            txt = groq_chat(shape_p, budget=budget, max_tokens=4000, effort="medium")
+            txt = groq_chat(shape_p, budget=budget, max_tokens=4000, effort="medium",
+                            models=["openai/gpt-oss-20b", "openai/gpt-oss-120b"])
             m = re.search(r"\{.*\}", txt, re.S)
             return json.loads(m.group(0)) if m else {}
         except Exception as e:
@@ -1054,7 +1070,10 @@ def line_tidy(raw, style, accurate, budget):
         try:
             k = int(h.get("line")) - 1
             title = HARAKAT.sub("", str(h.get("title") or "")).replace("_", " ").strip(" .:#")
-            if 0 <= k < len(raw) and title and title not in ("تحية", "مقدمة", "ملاحظة", "ملاحظات", "ختام", "شكر", "صديقي"):
+            known = {_skeleton_word(w) for w in (vocab or [])}
+            # a heading is a full name (two words or more) or one of the user's own words; a lone word like «تسميع» is not
+            if 0 <= k < len(raw) and title and (len(title.split()) >= 2 or _skeleton_word(title) in known) and \
+                    title not in ("تحية", "مقدمة", "ملاحظة", "ملاحظات", "ختام", "شكر", "صديقي"):
                 heads[k] = title
         except Exception:
             pass
@@ -1088,7 +1107,7 @@ def line_tidy(raw, style, accurate, budget):
         if k in heads:
             flush()
             segs.append({"t": int(t), "h": True, "x": heads[k]})
-        elif k in starts:
+        elif k in starts and len(para) >= 3 and len(" ".join(para)) >= 160:  # never cut a thought short
             flush()
         if k in cont and k + 1 < len(raw):  # the sentence goes on: its full stop becomes a comma
             txt = re.sub(r"[.]+$", "،", txt)
@@ -1115,7 +1134,7 @@ def line_tidy(raw, style, accurate, budget):
     return segs
 
 
-def groq_tidy(style, lang, raw, dur, job=None, accurate=False):
+def groq_tidy(style, lang, raw, dur, job=None, accurate=False, vocab=None):
     """Tidy a long recording in pieces (each fits the per-minute limit), all at once; then a short summary if asked."""
     from concurrent.futures import ThreadPoolExecutor
     chunks, cur, size = [], [], 0
@@ -1133,7 +1152,7 @@ def groq_tidy(style, lang, raw, dur, job=None, accurate=False):
     def one(k):
         if lang != "fusha" and base_style in ("tidy", "verbatim"):
             try:  # the speaker's own words, only cleaned (the way the user wants «مرتّب»)
-                return line_tidy(chunks[k], base_style, accurate, budget=max(60, 25 * n))
+                return line_tidy(chunks[k], base_style, accurate, budget=max(60, 25 * n), vocab=vocab)
             except ClaudeUnavailable as e:
                 alog(f"[groq-chat] line tidy fell back: {e!r}"[:160])
         prompt = tidy_prompt(base_style, lang, chunks[k], accurate)
@@ -1214,7 +1233,7 @@ def tidy_prompt(style, lang, raw, accurate=False):
 {lines}"""
 
 
-def transcribe_worker(job, files, style, lang):
+def transcribe_worker(job, files, style, lang, vocab=None):
     from concurrent.futures import ThreadPoolExecutor
     try:
         n = len(files)
@@ -1241,7 +1260,7 @@ def transcribe_worker(job, files, style, lang):
             if SM_KEY:  # 1) hear it: Speechmatics first (most accurate on Saudi speech)
                 job["stage"] = "نسمع التسجيل ونكتبه…" if n == 1 else job["stage"]
                 try:
-                    raw, accurate = sm_transcribe(src, dur), True
+                    raw, accurate = sm_transcribe(src, dur, vocab), True
                 except Exception as e:
                     alog(f"[speechmatics] failed, using groq: {e!r}"[:200])
             if raw is None and GEMINI_KEY and GROQ_KEY and not SM_KEY:
@@ -1264,7 +1283,7 @@ def transcribe_worker(job, files, style, lang):
                 segs = None
                 job["stage"] = "نرتّب النص…" if n == 1 else job["stage"]
                 try:
-                    segs = groq_tidy(style, lang, raw, dur, job, accurate) if GROQ_KEY else None
+                    segs = groq_tidy(style, lang, raw, dur, job, accurate, vocab) if GROQ_KEY else None
                 except ClaudeUnavailable as e:
                     alog(f"[groq-chat] tidy failed: {e!r}"[:200])
                 if not segs and GEMINI_KEY:  # last try: Google's assistant, briefly
@@ -1340,7 +1359,7 @@ async def prepare(file: UploadFile = File(...), use_claude: bool = True):
 
 
 @app.post("/api/transcribe")
-async def transcribe(files: list[UploadFile] = File(...), style: str = Form("tidy"), lang: str = Form("spoken")):
+async def transcribe(files: list[UploadFile] = File(...), style: str = Form("tidy"), lang: str = Form("spoken"), vocab: str = Form("")):
     if not (GEMINI_KEY or GROQ_KEY or SM_KEY):
         raise HTTPException(400, "voice_needs_key")
     if not files or len(files) > 8:
@@ -1358,7 +1377,8 @@ async def transcribe(files: list[UploadFile] = File(...), style: str = Form("tid
         src.write_bytes(await f.read())
         name = re.sub(r"\.[^.]+$", "", f.filename or "") or f"تسجيل {k + 1}"
         saved.append((src, name))
-    threading.Thread(target=transcribe_worker, args=(job, saved, style, lang), daemon=True).start()
+    words = [w.strip() for w in re.split(r"[،,\n]+", vocab or "") if 1 < len(w.strip()) <= 60]
+    threading.Thread(target=transcribe_worker, args=(job, saved, style, lang, words), daemon=True).start()
     return {"job": jid}
 
 

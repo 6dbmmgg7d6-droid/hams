@@ -14,7 +14,7 @@
 <meta property="og:image" content="/og.png">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Reem+Kufi:wght@500;700&family=Amiri:wght@400;700&family=Aref+Ruqaa:wght@700&family=IBM+Plex+Sans+Arabic:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Reem+Kufi:wght@500;700&family=Amiri:wght@400;700&family=Aref+Ruqaa:wght@700&family=IBM+Plex+Sans+Arabic:wght@400;500;600&family=Noto+Naskh+Arabic:wght@400;600&display=swap">
 <style>
 /* Design «أ»: night stage with a live wave on top, an open paper ledger below, a tape deck at the bottom */
 :root{
@@ -199,6 +199,8 @@ body.playing .reel{animation:spin 3s linear infinite}
 .vlist .picked{padding:9px 14px}
 .opts{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:14px;position:relative;z-index:1;font-size:14px;color:#4a5164}
 .opts .lbl{margin-left:6px}
+.vocab{display:block;margin-top:14px;position:relative;z-index:1;font-size:13px;color:#4a5164}
+.vocab textarea{display:block;width:100%;margin-top:6px;border:1px solid rgba(31,42,68,.2);border-radius:12px;background:rgba(255,255,255,.7);padding:8px 12px;font-size:15px;color:var(--navy);resize:vertical;font-family:'IBM Plex Sans Arabic',sans-serif}
 .opts button{padding:5px 14px;border-radius:999px;border:1px solid rgba(31,42,68,.2);color:#5b6378;font-size:14px;background:rgba(255,255,255,.6)}
 .opts button[aria-pressed="true"]{background:var(--navy);color:var(--paper);border-color:var(--navy)}
 /* voice notebook */
@@ -219,7 +221,7 @@ body.playing .reel{animation:spin 3s linear infinite}
 .vseg{display:flex;gap:18px;align-items:flex-start;position:relative;z-index:1}
 .vseg .ts{flex:none;width:52px;font-size:13px;font-weight:500;color:#9a5a2e;line-height:36px;text-align:center;direction:ltr;user-select:none;-webkit-user-select:none}
 .vseg .ts:before{content:attr(data-t)}
-.vseg .tx{flex:1;margin:0;font-family:'Amiri';font-size:19px;line-height:36px;border-radius:4px;padding:0 4px}
+.vseg .tx{flex:1;margin:0;font-family:'Noto Naskh Arabic','Amiri',serif;font-size:18px;line-height:36px;border-radius:4px;padding:0 4px}
 .vseg.h .tx{font-family:'Aref Ruqaa';color:var(--red);font-size:23px;font-weight:700}
 .vpaper.live .vseg{cursor:pointer}
 .vpaper.live .vseg:hover .tx{background:rgba(31,42,68,.06)}
@@ -293,6 +295,8 @@ body.playing .reel{animation:spin 3s linear infinite}
       <div class="vrec"><button type="button" class="mic" id="mic" aria-label="سجّل من الموقع"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button><span class="t" id="mic-t">أو سجّل من هنا مباشرة</span></div>
       <div class="vlist" id="vlist"></div>
       <div class="opts" role="group" aria-label="الأسلوب"><span class="lbl">الأسلوب:</span><button type="button" data-style="tidy" aria-pressed="true">مرتّب</button><button type="button" data-style="short" aria-pressed="false">مختصر</button><button type="button" data-style="summary" aria-pressed="false">مرتّب مع ملخص</button><button type="button" data-style="verbatim" aria-pressed="false">حرفي</button></div>
+      <label class="vocab"><span>كلمات وأسماء تتكرر في تسجيلاتك (اختياري): افصل بينها بفاصلة، والسماع يركّز عليها فيكتبها صح.</span>
+        <textarea id="vocab" dir="auto" rows="2" placeholder="مثل: الترددات، التسميع، التثبيت، أحمد يسري، إبراهيم الخليفي"></textarea></label>
       <div class="opts" role="group" aria-label="اللغة"><span class="lbl">اللغة:</span><button type="button" data-lang="spoken" aria-pressed="true">مثل ما انقال</button><button type="button" data-lang="fusha" aria-pressed="false">فصحى مبسّطة</button></div>
     </div>
     <div id="paste-box" hidden><textarea id="paste" class="ed" dir="auto" placeholder="ألصق النص هنا…" aria-label="النص"></textarea></div>
@@ -529,6 +533,9 @@ function renderVList(){
     row.appendChild(nm); row.appendChild(sz); row.appendChild(x); box.appendChild(row);
   });
 }
+/* the user's own recurring words and names: kept on this device */
+try { $('vocab').value = localStorage.getItem('hams.vocab') || ''; } catch (e) {}
+$('vocab').addEventListener('input', function(){ try { localStorage.setItem('hams.vocab', $('vocab').value); } catch (e) {} });
 $('vfile').addEventListener('change', function(e){ var l = Array.prototype.slice.call(e.target.files || []); e.target.value = ''; addVoiceFiles(l); });
 $('vdz').addEventListener('dragenter', function(){ $('vdz').classList.add('over'); });
 ['dragleave', 'drop'].forEach(function(ev){ $('vdz').addEventListener(ev, function(){ $('vdz').classList.remove('over'); }); });
@@ -610,7 +617,7 @@ async function convertVoice(){
   try {
     var fd = new FormData();
     files.forEach(function(f){ fd.append('files', f, f.name); });
-    fd.append('style', S.vstyle); fd.append('lang', S.vlang);
+    fd.append('style', S.vstyle); fd.append('lang', S.vlang); fd.append('vocab', $('vocab').value || '');
     var r = await (await api('/api/transcribe', { method: 'POST', body: fd })).json();
     S.job = r.job;
     while (true) {
