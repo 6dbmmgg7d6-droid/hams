@@ -971,7 +971,7 @@ CLEAN_PROMPT = """أمامك أسطر مرقّمة من تفريغ {kind} لتس
 لكل سطر اكتب رقمه ثم | ثم نفس كلمات السطر بالضبط وبنفس ترتيبها، مع تصحيح الإملاء والترقيم فقط:
 - الإملاء: التاء المربوطة في آخر الكلمة (ملاحظه ← ملاحظة)، والهمزات (اذكر ← أذكر، انه ← أنه، الى ← إلى)، والألف المقصورة.
 - الترقيم: ضع (؟) بعد السؤال، و(:) قبل كلام منقول فقط. لا تضف فواصل ولا نقاط داخل السطر، واترك علامة آخر السطر كما هي.
-{fix}ممنوع: حذف أي كلمة أو تغييرها أو تبديلها بمرادف، وتحويل اللهجة للفصحى (اترك: هذي، أبيك، ما يجي، وحنا، شوي، إيه، اللي... كما هي)، وإضافة كلام أو تنوين أو تشكيل.
+{fix}{alt}ممنوع: حذف أي كلمة أو تغييرها أو تبديلها بمرادف، وتحويل اللهجة للفصحى (اترك: هذي، أبيك، ما يجي، وحنا، شوي، إيه، اللي... كما هي)، وإضافة كلام أو تنوين أو تشكيل.
 لا تكتب أي شيء آخر غير الأسطر.
 
 الأسطر:
@@ -996,19 +996,33 @@ def _skeleton_word(w):
     return "".join(re.findall(r"[ء-ي0-9A-Za-z]+", w))
 
 
-def keep_words(orig, cleaned, accurate):
+ALT_RULE = ("- تحت كل سطر يوجد سطر يبدأ بـ «ب:» فيه سماع ثانٍ لنفس الكلام من برنامج آخر. السماع الثاني فيه أخطاء أكثر عموماً، "
+            "لكنه أحياناً يصيب كلمة أخطأ فيها السطر الأساسي. إذا كانت كلمة في السطر الأساسي لا تناسب المعنى، وفي «ب» كلمة في نفس "
+            "الموضع تناسب المعنى بوضوح (مثل: «الربع الماضي» وفي ب «الاربع الماضي» ← الأربعاء الماضي، أو «الظهر» وفي ب «الظاهر»)، فخذ "
+            "كلمة «ب» بإملاء صحيح. لا تأخذ من «ب» أي شيء آخر، ولا تكتب سطر «ب» في جوابك.\n")
+
+
+def keep_words(orig, cleaned, accurate, alt=""):
     """Take the assistant's spelling and punctuation, but never its word changes: word by word, anything it dropped or
     changed comes back exactly as heard, and nothing it added is kept."""
     import difflib
     o = orig.split()
     c = HARAKAT.sub("", cleaned).split()
     ok, ck = [_skeleton_word(w) for w in o], [_skeleton_word(w) for w in c]
+    # words the second hearing had (and spoken variants of them: «الاربع» ← «الأربعاء»)
+    alt_sk = {_skeleton_word(w) for w in (alt or "").split()}
+    alt_sk |= {w + "ا" for w in alt_sk} | {w + "اء" for w in alt_sk} | {w.rstrip("اء") for w in alt_sk}
+
+    def from_alt(words):
+        return all((not _skeleton_word(w)) or _skeleton_word(w) in alt_sk for w in words)
     out = []
     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ok, ck, autojunk=False).get_opcodes():
         if tag == "equal":
             out += c[j1:j2]
         elif tag in ("replace", "delete"):
-            if not accurate and tag == "replace" and (i2 - i1) == (j2 - j1) == 1:
+            if tag == "replace" and alt and from_alt(c[j1:j2]) and (j2 - j1) <= (i2 - i1) + 1:
+                out += c[j1:j2]  # taken from the second hearing, which got this word right
+            elif not accurate and tag == "replace" and (i2 - i1) == (j2 - j1) == 1:
                 out += c[j1:j2]  # the weaker recognizer: a single misheard word may be corrected
             else:
                 out += o[i1:i2]
@@ -1028,12 +1042,85 @@ def drop_fillers(t):
     return t
 
 
-def line_tidy(raw, style, accurate, budget, vocab=None):
+SPOKEN_FIX = {"الاربع": "الأربعاء", "الربوع": "الأربعاء", "الثلوث": "الثلاثاء", "الخميسه": "الخميس"}  # spoken day names
+
+
+def choose_words(raw, alts, budget, vocab=None):
+    """Two hearings of the same sentence: every single word they disagree on becomes a short either/or question for the
+    assistant («الربع» or «الاربع»?). It can only answer أ or ب, so nothing new can be written in."""
+    import difflib
+    known = {_skeleton_word(w) for v in (vocab or []) for w in v.split()}
+    qs = []  # (line, word index in the main hearing, main word, other word, context)
+    sure = []  # the second hearing has one of the user's own words: taken without asking
+    for k, ((t, a), b) in enumerate(zip(raw, alts)):
+        if not b:
+            continue
+        aw, bw = a.split(), b.split()
+        ask, bsk = [_skeleton_word(w) for w in aw], [_skeleton_word(w) for w in bw]
+        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ask, bsk, autojunk=False).get_opcodes():
+            if tag != "replace":
+                continue
+            # pair the differing words one to one (also inside a group: «الايام الظهر» / «الانيام الظاهر»)
+            pairs = list(zip(range(i1, i2), range(j1, j2))) if (i2 - i1) == (j2 - j1) else \
+                [(i1, j1)] if min(i2 - i1, j2 - j1) == 1 else []
+            for ia, jb in pairs:
+                if not (ask[ia] and bsk[jb]):
+                    continue
+                wa = aw[ia]
+                wb = SPOKEN_FIX.get(re.sub(r"[^\u0621-\u064A]", "", bw[jb]), re.sub(r"[^\u0621-\u064A]", "", bw[jb]))
+                sa, sb = _skeleton_word(wa), _skeleton_word(wb)
+                if not wb or sa == sb or difflib.SequenceMatcher(None, sa, sb).ratio() < 0.5:
+                    continue  # same word, or something unrelated (a different stretch of speech)
+                if sb in known and sa not in known:
+                    sure.append((k, ia, wa, wb, ""))
+                    continue
+                ctx = " ".join(aw[max(0, ia - 6):ia] + ["[" + wa + "]"] + aw[ia + 1:ia + 7])
+                qs.append((k, ia, wa, wb, ctx))
+    lines = [list(x.split()) for _, x in raw]
+
+    def put(k, i, wb):
+        lead = re.match(r"^[^\u0621-\u064A]*", lines[k][i]).group(0)
+        tail = re.search(r"[^\u0621-\u064A]*$", lines[k][i]).group(0)
+        lines[k][i] = lead + wb + tail  # keep the main hearing's punctuation around the word
+
+    for k, i, wa, wb, _ in sure:
+        put(k, i, wb)
+    if not qs:
+        return [(t, " ".join(w)) for (t, _), w in zip(raw, lines)]
+    qs = qs[:60]
+    prompt = ("هذه جمل من تسجيل صوتي باللهجة السعودية سمعها برنامجان، واختلفا في كلمة واحدة في كل جملة (بين القوسين المربعين). "
+              "لكل رقم، اقرأ الجملة وفكّر: أي الكلمتين هي التي تجعل الجملة صحيحة ومفهومة؟ اكتب «أ» للأولى أو «ب» للثانية. "
+              "لا تهتم بالإملاء (همزة أو تاء مربوطة)، المهم الكلمة نفسها. وإذا كانت الكلمتان صحيحتين بنفس الدرجة فاختر «أ».\n"
+              "اكتب لكل رقم سطراً بالشكل: الرقم: أ أو الرقم: ب، ولا شيء غير ذلك.\n\n"
+              + "\n".join(f"{n + 1}) «{q[4]}» ← أ: {q[2]} / ب: {q[3]}" for n, q in enumerate(qs)))
+    try:
+        out = groq_chat(prompt, budget=min(60, budget), max_tokens=5000, effort="medium", models=["openai/gpt-oss-120b"])
+    except ClaudeUnavailable as e:
+        alog(f"[groq-chat] word choice skipped: {e!r}"[:160])
+        return [(t, " ".join(w)) for (t, _), w in zip(raw, lines)]
+    pick = {}
+    for line in out.splitlines():
+        m = re.match(r"^\s*(\d+)\s*[):.\-]?\s*:?\s*([أاب])", line.strip())
+        if m:
+            pick[int(m.group(1)) - 1] = m.group(2) == "ب"
+    changed = len(sure)
+    for n, (k, i, wa, wb, _) in enumerate(qs):
+        if pick.get(n):
+            put(k, i, wb)
+            changed += 1
+    alog(f"[groq-chat] two hearings: {len(qs)} differences, {changed} taken from the second")
+    return [(t, " ".join(w)) for (t, _), w in zip(raw, lines)]
+
+
+def line_tidy(raw, style, accurate, budget, vocab=None, alts=None):
     """The speaker's own words: one assistant only fixes spelling and punctuation, another only says where the headings,
     paragraphs and real sentence ends are. Both run at the same time."""
     from concurrent.futures import ThreadPoolExecutor
     numbered = "\n".join(f"{i + 1}| {x}" for i, (t, x) in enumerate(raw))
-    clean_p = CLEAN_PROMPT.format(kind="دقيق" if accurate else "آلي", fix="" if accurate else
+    with_alt = "\n".join(f"{i + 1}| {x}" + (f"\nب: {alts[i]}" if alts and alts[i] else "") for i, (t, x) in enumerate(raw))
+    if alts:  # where the two hearings disagree on a word, the assistant only picks one of the two
+        raw = choose_words(raw, alts, budget, vocab)
+    clean_p = CLEAN_PROMPT.format(kind="دقيق" if accurate else "آلي", alt="", fix="" if accurate else
                                   "- إذا كانت كلمة بلا أي معنى في السياق بسبب خطأ السماع، فاكتب الكلمة الصحيحة المقصودة، فقط عند الوضوح التام.\n") + numbered
     shape_p = SHAPE_PROMPT + numbered
 
@@ -1043,6 +1130,8 @@ def line_tidy(raw, style, accurate, budget, vocab=None):
             # spelling needs the bigger assistant: it waits for it rather than taking the smaller one
             for line in groq_chat(clean_p, budget=budget, max_tokens=6000, effort="medium",
                                   models=["openai/gpt-oss-120b"]).splitlines():
+                if line.strip().startswith("ب:"):
+                    continue
                 m = re.match(r"^\s*\[?(\d+)\]?\s*[|｜:.)-]\s*(.*)$", line.strip())
                 if m and 0 <= int(m.group(1)) - 1 < len(raw):
                     got[int(m.group(1)) - 1] = m.group(2).strip()
@@ -1066,13 +1155,17 @@ def line_tidy(raw, style, accurate, budget, vocab=None):
     if not got and not sh:
         raise ClaudeUnavailable("line tidy: nothing came back")
     heads = {}
+    said = {_skeleton_word(w) for _, x in raw for w in x.split()}
+    said |= {w[1:] for w in said if w[:1] in "وفبل"}  # «وكذلك إبراهيم» still counts as «إبراهيم»
     for h in sh.get("headings") or []:
         try:
             k = int(h.get("line")) - 1
             title = HARAKAT.sub("", str(h.get("title") or "")).replace("_", " ").strip(" .:#")
             known = {_skeleton_word(w) for w in (vocab or [])}
             # a heading is a full name (two words or more) or one of the user's own words; a lone word like «تسميع» is not
-            if 0 <= k < len(raw) and title and (len(title.split()) >= 2 or _skeleton_word(title) in known) and \
+            # its words must have been said (a name from the speech), never a title the assistant made up
+            if all(_skeleton_word(w) in said for w in title.split()) and \
+                    0 <= k < len(raw) and title and (len(title.split()) >= 2 or _skeleton_word(title) in known) and \
                     title not in ("تحية", "مقدمة", "ملاحظة", "ملاحظات", "ختام", "شكر", "صديقي"):
                 heads[k] = title
         except Exception:
@@ -1134,25 +1227,42 @@ def line_tidy(raw, style, accurate, budget, vocab=None):
     return segs
 
 
-def groq_tidy(style, lang, raw, dur, job=None, accurate=False, vocab=None):
+def align_alt(raw, second):
+    """For each sentence of the main hearing, the second hearing's words from the same stretch of time."""
+    if not second:
+        return None
+    starts = [t for t, _ in raw] + [10 ** 9]
+    out = [[] for _ in raw]
+    for t, x in second:
+        k = max(0, next((i for i in range(len(raw)) if starts[i + 1] > t + 0.7), len(raw) - 1))
+        out[k].append(x)
+    return [" ".join(v) for v in out]
+
+
+def groq_tidy(style, lang, raw, dur, job=None, accurate=False, vocab=None, alts=None):
     """Tidy a long recording in pieces (each fits the per-minute limit), all at once; then a short summary if asked."""
     from concurrent.futures import ThreadPoolExecutor
-    chunks, cur, size = [], [], 0
-    for seg in raw:
-        if cur and size + len(seg[1]) > 2400:
+    chunks, cur, size, achunks, acur = [], [], 0, [], []
+    limit = 1500 if alts else 2400  # two hearings per line: smaller pieces to stay inside the per-minute limit
+    for i, seg in enumerate(raw):
+        if cur and size + len(seg[1]) > limit:
             chunks.append(cur)
-            cur, size = [], 0
+            achunks.append(acur)
+            cur, size, acur = [], 0, []
         cur.append(seg)
+        acur.append(alts[i] if alts else "")
         size += len(seg[1])
     if cur:
         chunks.append(cur)
+        achunks.append(acur)
     base_style = "tidy" if style == "summary" else style
     n = len(chunks)
 
     def one(k):
         if lang != "fusha" and base_style in ("tidy", "verbatim"):
             try:  # the speaker's own words, only cleaned (the way the user wants «مرتّب»)
-                return line_tidy(chunks[k], base_style, accurate, budget=max(60, 25 * n), vocab=vocab)
+                return line_tidy(chunks[k], base_style, accurate, budget=max(60, 25 * n), vocab=vocab,
+                                 alts=achunks[k] if alts else None)
             except ClaudeUnavailable as e:
                 alog(f"[groq-chat] line tidy fell back: {e!r}"[:160])
         prompt = tidy_prompt(base_style, lang, chunks[k], accurate)
@@ -1256,13 +1366,24 @@ def transcribe_worker(job, files, style, lang, vocab=None):
             dur = dur or audio_seconds(small)
             note = ""
             segs = None
-            raw, accurate = None, False
+            raw, accurate, second = None, False, None
             if SM_KEY:  # 1) hear it: Speechmatics first (most accurate on Saudi speech)
                 job["stage"] = "نسمع التسجيل ونكتبه…" if n == 1 else job["stage"]
-                try:
-                    raw, accurate = sm_transcribe(src, dur, vocab), True
-                except Exception as e:
-                    alog(f"[speechmatics] failed, using groq: {e!r}"[:200])
+                from concurrent.futures import ThreadPoolExecutor as _TP
+                with _TP(max_workers=2) as ex2:  # the second hearing (Groq) at the same time: it catches some words
+                    f_sm = ex2.submit(sm_transcribe, src, dur, vocab)
+                    f_wh = ex2.submit(groq_transcribe, src, dur, job) if GROQ_KEY else None
+                    try:
+                        raw, accurate = f_sm.result(), True
+                    except Exception as e:
+                        alog(f"[speechmatics] failed, using groq: {e!r}"[:200])
+                    try:
+                        second = f_wh.result() if f_wh else None
+                    except Exception as e:
+                        second = None
+                        alog(f"[groq] second hearing skipped: {e!r}"[:160])
+                if raw is None and second:
+                    raw, second = second, None
             if raw is None and GEMINI_KEY and GROQ_KEY and not SM_KEY:
                 # Google hears Saudi speech well: one quick try (no waiting when it is busy), Groq right after if not
                 job["stage"] = "المساعد الذكي يسمع ويكتب…" if n == 1 else job["stage"]
@@ -1283,7 +1404,7 @@ def transcribe_worker(job, files, style, lang, vocab=None):
                 segs = None
                 job["stage"] = "نرتّب النص…" if n == 1 else job["stage"]
                 try:
-                    segs = groq_tidy(style, lang, raw, dur, job, accurate, vocab) if GROQ_KEY else None
+                    segs = groq_tidy(style, lang, raw, dur, job, accurate, vocab, align_alt(raw, second)) if GROQ_KEY else None
                 except ClaudeUnavailable as e:
                     alog(f"[groq-chat] tidy failed: {e!r}"[:200])
                 if not segs and GEMINI_KEY:  # last try: Google's assistant, briefly
