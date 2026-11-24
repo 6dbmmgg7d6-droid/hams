@@ -205,7 +205,7 @@ def parse_pages(text, nums):
 
 def gemini_models():
     """Ask Google which models this key can use right now (names change when old versions are retired),
-    and order them: newest regular «flash» first, then the lighter «flash-lite» ones."""
+    and order them: newest «flash-lite» first (much bigger free daily limit, faster), then the regular «flash» ones."""
     import requests
 
     if _MODEL_CACHE["list"] and time.time() - _MODEL_CACHE["at"] < 3600:
@@ -226,7 +226,7 @@ def gemini_models():
 
     def rank(n):
         ver = [int(x) for x in re.findall(r"\d+", n)[:2]] + [0, 0]
-        return ("lite" in n, "preview" in n, -ver[0], -ver[1], "latest" not in n, n)
+        return ("lite" not in n, "preview" in n, -ver[0], -ver[1], "latest" not in n, n)
 
     found.sort(key=rank)
     lst = list(dict.fromkeys([m for m in (os.environ.get("GEMINI_MODEL", ""),) if m] + found + GEMINI_MODELS))
@@ -265,11 +265,14 @@ def ask_gemini(prompt, image_path=None, image_paths=None):
             if r.status_code == 404:
                 last = f"model {model} not found"
                 break
-            if r.status_code in (429, 500, 503):
+            if r.status_code == 429:
+                last = "limit 429"
+                break  # this version's free limit is used up: go straight to the next version
+            if r.status_code in (500, 503):
                 last = f"busy {r.status_code}"
-                if r.status_code == 429 and attempt >= 1:
-                    break  # this version's free limit is used up: try the next version
-                time.sleep(3 * (attempt + 1))
+                if attempt >= 1:
+                    break  # still busy after one retry: try the next version
+                time.sleep(2)
                 continue
             if r.status_code != 200:
                 raise ClaudeUnavailable(f"gemini {r.status_code}: {r.text[:200]}")
@@ -353,12 +356,13 @@ def prepare_worker(job, src: Path, name: str, use_claude: bool):
 
                 if GEMINI_KEY:
                     batches = [pages[b:b + GEMINI_BATCH] for b in range(0, len(pages), GEMINI_BATCH)]
-                    for k, batch in enumerate(batches):
-                        if job["cancel"]:
-                            raise RuntimeError("cancelled")
-                        job["stage"] = f"المساعد الذكي يقرأ الصفحات ({min((k + 1) * GEMINI_BATCH, n)} من {n})"
-                        job["progress"] = 0.15 + 0.8 * k / len(batches)
-                        result.extend(page_block(batch))
+                    job["stage"] = f"المساعد الذكي يقرأ الصفحات ({n})"
+                    with ThreadPoolExecutor(max_workers=min(3, len(batches))) as ex:  # up to 3 groups at once
+                        futs = [ex.submit(page_block, b) for b in batches]
+                        for k, f in enumerate(futs):
+                            result.extend(f.result())
+                            job["progress"] = 0.15 + 0.8 * (k + 1) / len(batches)
+                            job["stage"] = f"جهزت {min((k + 1) * GEMINI_BATCH, n)} من {n} صفحات"
                     if not result:
                         raise ClaudeUnavailable("empty")
                     pages_to_do = []
