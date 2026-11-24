@@ -542,8 +542,9 @@ function chunkLong(s, max){
 /* sentences with natural pauses: only a breath between sentences, a bit more after a heading or a new page */
 function buildSents(text){
   var out = [], page = 0, ln = 0, newPage = false;
-  /* headings are marked by the assistant with «#»; older text without marks keeps the old guess */
-  var marked = /^\s*#+\s*\S/m.test(String(text));
+  /* emphasis comes only from the assistant's «#» (taken from how the page itself looks);
+     a file the assistant prepared (it has page titles) never gets guessed headings; only plain pasted text keeps the old guess */
+  var marked = /^\s*#+\s*\S/m.test(String(text)) || /^=+\s*الصفحة/m.test(String(text));
   String(text).split(/\n+/).forEach(function(rawLine){
     var line = rawLine.trim(); if (!line) return;
     var m = line.match(/^=+\s*الصفحة\s*([0-9٠-٩]+)\s*=+$/);
