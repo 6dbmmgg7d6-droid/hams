@@ -929,7 +929,8 @@ def smart_chat(prompt, budget=90, max_tokens=6000, effort="medium", temperature=
     """The writing jobs (spelling, word choice, summary): Groq's big assistant first; if its daily limit is used up,
     Google's assistant (one quick try, no waiting); only then Groq's smaller one, whose writing is weaker."""
     try:
-        return groq_chat(prompt, budget=max(20, budget * 0.5), max_tokens=max_tokens, effort=effort,
+        # waits at most ~10 seconds for it when it is busy this minute; then the next one answers
+        return groq_chat(prompt, budget=12, max_tokens=max_tokens, effort=effort,
                          models=["openai/gpt-oss-120b"], temperature=temperature)
     except ClaudeUnavailable as e:
         alog(f"[groq-chat] big assistant unavailable: {e!r}"[:140])
