@@ -1268,26 +1268,38 @@ def align_alt(raw, second):
     return [" ".join(v) for v in out]
 
 
-CONDENSE_PROMPT = """أمامك فقرات مرقّمة من تفريغ مرتّب لتسجيل صوتي باللهجة السعودية. أعد كتابة كل فقرة {how}، بنفس كلمات المتكلم ولهجته وبصيغة المتكلم نفسه.
-احذف: عبارات الحمد والتسبيح والدعاء المتكررة (مثل: اللهم لك الحمد، الحمد لله، سبحان الله، والله، الله يجزاك خير)، والكلام المكرر، والأسماء المكررة، والتحيات، والكلام قليل الفائدة.
-أبقِ كل معلومة مهمة كما هي: الأسماء، والملاحظات، والأحكام والتقييمات، والأسباب، والأيام والأرقام، والسور والأجزاء.
-ممنوع: إضافة معلومة، أو التحويل إلى نقاط، أو الكلام عن المتكلم بصيغة الغائب (لا تكتب: يتكلم عن، يذكر أن)، أو التحويل للفصحى.
-اكتب لكل فقرة رقمها ثم | ثم الفقرة المختصرة في سطر واحد. الفقرة التي كلها تحية أو دعاء أو شكر اكتب بعد رقمها: -
+CONDENSE_PROMPT = """أمامك فقرات مرقّمة من تفريغ مرتّب لتسجيل صوتي باللهجة السعودية. اكتب ملخصاً لكل فقرة {how}.
+القواعد:
+- بنفس كلمات المتكلم ولهجته وبصيغة المتكلم نفسه (أنا، قلت، عتبت عليهم)، لا تتكلم عنه بصيغة الغائب، ولا تحوّل للفصحى، ولا تستخدم نقاطاً.
+- جمل كاملة مفهومة ومترابطة، كل جملة معناها مكتمل، ولا تقطع جملة في منتصفها.
+- إملاء صحيح (الهمزات، التاء المربوطة) وترقيم صحيح: فاصلة بين أجزاء الجملة، ونقطة في نهاية الجملة فقط.
+- احذف: التحيات والشكر والدعاء، وعبارات الحمد والتسبيح، والتكرار، والكلام قليل الفائدة.
+- أبقِ كل معلومة مهمة: الأسماء، والملاحظات، والتقييمات، والأسباب، والأيام، والسور والأجزاء.
+- لا تضف أي معلومة غير موجودة.
+اكتب لكل فقرة رقمها ثم | ثم ملخصها في سطر واحد. الفقرة التي كلها تحية أو دعاء أو شكر اكتب بعد رقمها: -
 لا تكتب أي شيء آخر.
 
 الفقرات:
 """
+PRAISE = re.compile(r"(?:^|(?<=[\s،,.؟]))(?:و?اللهم لك الحمد(?: والمن[هة])?|و?ل?ل?ه? ?الحمد لله|ولله الحمد|و?سبحان الله|والله العظيم)(?=$|[\s،,.؟])[،,]?")
+
+
+def _drop_praise(t):
+    t = PRAISE.sub("", t)
+    t = re.sub(r"\s{2,}", " ", t)
+    t = re.sub(r"\s+([،,.؟?!:])", r"\1", t)
+    t = re.sub(r"([،,])\s*([.؟?!])", r"\2", t)
+    t = re.sub(r"(^|[.؟?!]\s*)[،,]\s*", r"\1", t)
+    return t.strip()
 
 
 def condense(segs, style):
-    """«مرتّب مع ملخص» and «مختصر»: the same tidy text in the same order and headings, only shorter. A paragraph that
-    comes back with words that were never said stays as the tidy one."""
+    """«مرتّب مع ملخص» and «مختصر»: each tidy paragraph summarised in the speaker's own words, as complete sentences, in the
+    same order and under the same headings. A paragraph whose summary brings in words that were never said stays tidy."""
     paras = [i for i, x in enumerate(segs) if not x["h"]]
     if not paras:
         return segs
-    how = "مختصرة إلى نحو نصف طولها أو أقل، مع الإبقاء على المعنى المهم فقط" if style == "short" else \
-        "أقصر قليلاً (نحو ثلثي طولها)، بحذف الحشو والتكرار وقليل الفائدة فقط"
-    out = {}
+    how = "مختصراً جداً (نحو ربع طولها أو ثلثه)، يبقى فيه المهم فقط" if style == "short" else "أقصر (نحو نصف طولها)"
     groups, cur, size = [], [], 0
     for i in paras:
         if cur and size + len(segs[i]["x"]) > 2400:
@@ -1300,8 +1312,8 @@ def condense(segs, style):
 
     def one(g):
         prompt = CONDENSE_PROMPT.format(how=how) + "\n".join(f"{n + 1}| {segs[i]['x']}" for n, i in enumerate(g))
-        try:
-            txt = groq_chat(prompt, budget=90, max_tokens=4000, effort="low", models=["openai/gpt-oss-120b", "openai/gpt-oss-20b"])
+        try:  # the big assistant writes clearly; the second one only if its daily limit is used up
+            txt = groq_chat(prompt, budget=90, max_tokens=6000, effort="medium", models=["openai/gpt-oss-120b", "openai/gpt-oss-20b"])
         except ClaudeUnavailable as e:
             alog(f"[groq-chat] condense skipped: {e!r}"[:160])
             return {}
@@ -1312,26 +1324,28 @@ def condense(segs, style):
                 got[g[int(m.group(1)) - 1]] = HARAKAT.sub("", m.group(2)).strip()
         return got
 
+    out = {}
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=min(2, len(groups))) as ex:
         for got in ex.map(one, groups):
             out.update(got)
     res = []
     for i, x in enumerate(segs):
-        if x["h"] or i not in out:
+        if x["h"]:
             res.append(x)
             continue
-        new = out[i]
-        if new in ("-", "—", ""):
-            continue  # only a greeting or thanks
+        new = out.get(i)
+        if new in ("-", "—"):
+            continue  # only a greeting, prayer or thanks
         said = set(_skeleton(x["x"]))
-        nw = _skeleton(new)
+        nw = _skeleton(new or "")
         foreign = [w for w in nw if w not in said and w.lstrip("وفبل") not in said]
-        # a summary may use a few words of its own («البداية» for «أول مرة»), but not a new story
-        if not nw or len(foreign) > max(2, int(len(nw) * 0.25)):
-            res.append(x)
-        else:
-            res.append({"t": x["t"], "h": False, "x": new})
+        if not nw or len(foreign) > max(2, int(len(nw) * 0.3)):  # nothing back, or a new story: keep the tidy paragraph
+            new = x["x"]
+        new = _drop_praise(new)
+        words = re.findall(r"[\u0621-\u064A]+", new)
+        if words and not all(w in ("لكن", "بس", "و", "يا", "يعني", "ف", "ثم", "هذا", "هذي", "طيب") for w in words):
+            res.append({"t": x["t"], "h": False, "x": new if re.search(r"[.؟?!]$", new) else new + "."})
     # a heading left with nothing under it goes too
     return [x for k, x in enumerate(res) if not (x["h"] and (k + 1 >= len(res) or res[k + 1]["h"]))]
 
