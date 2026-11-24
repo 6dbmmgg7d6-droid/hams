@@ -999,7 +999,7 @@ def line_tidy(raw, style, accurate, budget):
             order.append(("break", None))
             continue
         if line.startswith("#"):
-            h = HARAKAT.sub("", line.lstrip("#").strip())
+            h = HARAKAT.sub("", line.lstrip("#").strip()).replace("_", " ").strip(" .:")
             if h:
                 order.append(("head", h))
             continue
