@@ -648,7 +648,7 @@ for _name in ("og.png", "icon.png", "apple-touch-icon.png", "favicon.png"):
 @app.get("/manifest.json")
 def manifest():
     return JSONResponse({"name": "همس", "short_name": "همس", "description": "يقرأ لك… ويكتب عنك", "lang": "ar", "dir": "rtl",
-                         "start_url": "/", "display": "standalone", "background_color": "#07060d", "theme_color": "#07060d",
+                         "display": "standalone", "background_color": "#07060d", "theme_color": "#07060d",
                          "icons": [{"src": "/icon.png", "sizes": "512x512", "type": "image/png"},
                                    {"src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png"}]})
 
