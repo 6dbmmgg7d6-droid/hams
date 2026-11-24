@@ -47,6 +47,7 @@ body.playing .seal span:nth-child(2){animation-delay:.15s}body.playing .seal spa
 nav{display:flex;gap:28px}
 nav button{color:var(--mute);font-size:15px;padding:6px 0;border-bottom:1px solid transparent}
 nav button[aria-current="page"]{color:var(--ink);border-bottom-color:var(--gold)}
+nav .owner{align-self:center;font-size:12px;color:var(--gold);border:1px solid rgba(233,180,76,.4);border-radius:999px;padding:3px 12px;text-decoration:none;white-space:nowrap}
 
 /* shared bits */
 .err{background:rgba(255,138,122,.12);color:var(--err);border:1px solid rgba(255,138,122,.3);border-radius:12px;padding:10px 14px;font-size:14px}
@@ -257,6 +258,7 @@ body.playing .reel{animation:spin 3s linear infinite}
     <button type="button" data-nav="player" id="nav-player" hidden>يُقرأ الآن</button>
     <button type="button" data-nav="library">دفاتري</button>
     <button type="button" data-nav="home">دفتر جديد</button>
+    <a class="owner" id="owner-usage" href="https://portal.speechmatics.com/" target="_blank" rel="noopener" hidden title="رصيد السماع في «سبيتشماتكس» (يظهر في جهازك فقط)"></a>
   </nav>
 </header>
 
@@ -1206,6 +1208,27 @@ $('export').addEventListener('click', async function(){
   } catch (e) { $('exp-note').textContent = 'تعذّر حفظ الشريط.'; }
   btn.disabled = false;
 });
+
+/* the owner's own device only: a small listening-credit indicator (opened once with the owner's special link) */
+(function(){
+  var KEY = 'hams.owner';
+  try {
+    var q = new URLSearchParams(location.search).get('owner');
+    if (q) { localStorage.setItem(KEY, q); history.replaceState(null, '', location.pathname); }
+  } catch (e) {}
+  var t = null; try { t = localStorage.getItem(KEY); } catch (e) {}
+  if (!t) return;
+  fetch('/api/owner/usage?t=' + encodeURIComponent(t)).then(function(r){
+    if (r.status === 404) { try { localStorage.removeItem(KEY); } catch (e) {} return null; }
+    return r.ok ? r.json() : null;
+  }).then(function(u){
+    if (!u) return;
+    var hrs = (u.hours_until_yesterday || 0) + (u.today_minutes || 0) / 60;
+    var used = hrs < 1 ? toAr(Math.round(hrs * 60)) + ' دقيقة' : toAr(hrs.toFixed(1)).replace('.', '٫') + ' ساعة';
+    $('owner-usage').textContent = 'السماع: استُخدم ' + used;
+    $('owner-usage').hidden = false;
+  }).catch(function(){});
+})();
 
 window.__dafter = { speakable: speakable, buildSents: buildSents };
 setMode('doc');
