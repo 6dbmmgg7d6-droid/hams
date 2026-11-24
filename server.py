@@ -258,7 +258,7 @@ def alog(msg):
     del ASSIST_LOG[:-30]
 
 
-def ask_gemini(prompt, image_path=None, image_paths=None, audio_paths=None, timeout=None, budget=150):
+def ask_gemini(prompt, image_path=None, image_paths=None, audio_paths=None, timeout=None, budget=150, rounds=4, retry_busy=True):
     """One request to Google's free Gemini assistant; tries the next model name if one is unknown,
     and waits a little when the free limit is hit for a moment."""
     import base64
@@ -317,7 +317,7 @@ def ask_gemini(prompt, image_path=None, image_paths=None, audio_paths=None, time
             if r.status_code in (500, 503):
                 last = f"busy {r.status_code}"
                 alog(f"[assistant] {model} says: {r.text[:140]!r}")
-                if attempt >= 1 or time.time() - t0 > 15:  # slow «busy» answers: don't wait for a second one
+                if attempt >= 1 or not retry_busy or time.time() - t0 > 15:  # slow «busy» answers: don't wait for a second one
                     return (last, True)  # still busy after one retry: try the next version
                 time.sleep(2)
                 continue
@@ -330,7 +330,7 @@ def ask_gemini(prompt, image_path=None, image_paths=None, audio_paths=None, time
         return (last, True)
 
     last = "no version available"
-    for rnd in range(4):  # Google sometimes says «busy» for every version at once: wait a little and go round again
+    for rnd in range(rounds):  # Google sometimes says «busy» for every version at once: wait a little and go round again
         busy, soonest = False, None
         for model in gemini_models():
             until = EXHAUSTED.get(model, 0)
@@ -343,7 +343,7 @@ def ask_gemini(prompt, image_path=None, image_paths=None, audio_paths=None, time
                 return got
             last, b = got
             busy = busy or b
-        if not busy or rnd == 3 or left() < 20:
+        if not busy or rnd == rounds - 1 or left() < 20:
             break
         wait = max(5, min(40, (soonest - time.time()) if soonest else 10 * (rnd + 1)))
         wait = min(wait, max(0, left() - 15))
@@ -563,32 +563,33 @@ AUDIO_EXT = (".mp3", ".m4a", ".wav", ".aac", ".ogg", ".oga", ".opus", ".webm", "
 MAX_AUDIO_MIN = 90
 
 VOICE_STYLES = {
-    "tidy": "مرتّب: اكتب كل ما قيل بترتيبه، واحذف الحشو والتلعثم والتكرار (مثل: يعني، امم، إيه، اللي هو، والجمل المقطوعة التي يعيدها المتكلم)، "
-            "ورتّب الجملة إن لزم دون تغيير المعنى، ولا تحذف أي معلومة أو مثال أو رقم أو تعريف.",
+    "tidy": "مرتّب: اكتب كل ما قيل بنفس كلمات المتكلم وبنفس ترتيبه، واحذف فقط الحشو والتلعثم والتكرار (مثل: يعني، امم، إيه، اللي هو، "
+            "والكلمة أو الجملة التي يعيدها المتكلم مرتين)، وضع علامات الترقيم (، . ؟ :) في مكانها. لا تلخّص ولا تعِد الصياغة ولا تحذف أي معلومة "
+            "أو اسم أو حكم أو مثال أو رقم: النص المرتّب يكون قريباً جداً من طول الكلام الأصلي بعد حذف الحشو فقط.",
     "short": "مختصر: مثل المرتّب، لكن اختصر كل فقرة إلى أهم ما فيها، مع الإبقاء على كل المعلومات المهمة والتعريفات والأرقام والأمثلة الأساسية.",
     "summary": "مرتّب مع ملخص: ابدأ بعنوان «الملخص» وتحته من 5 إلى 10 نقاط قصيرة لأهم ما قيل، كل نقطة تبدأ بـ «- » ووقتها هو وقت أول ذكر لها، "
                "ثم اكتب الكلام كاملاً مرتّباً: احذف الحشو والتلعثم والتكرار دون حذف أي معلومة.",
     "verbatim": "حرفي: اكتب كل كلمة كما قيلت بالضبط، بما فيها التكرار والحشو، وأضف علامات الترقيم فقط.",
 }
 VOICE_LANGS = {
-    "spoken": "اكتب الكلام بلهجته كما قيل، ولا تحوّله إلى الفصحى، لكن بإملاء عربي سليم.",
+    "spoken": "اكتب الكلام بلهجته كما قيل بنفس كلمات المتكلم (مثل: ما يصير، يجيب، رجعته، كلمته، شوي)، ولا تحوّل أي كلمة إلى الفصحى، لكن بإملاء عربي سليم.",
     "fusha": "حوّل الكلام إلى فصحى مبسّطة وواضحة، مع الحفاظ على المعنى والمصطلحات وأسلوب الشرح.",
 }
 
 
 def voice_prompt(style, lang):
-    return f"""أنت كاتب محترف يفرّغ تسجيلاً صوتياً (غالباً محاضرة أو شرح بالعربية) إلى نص مكتوب سليم ومرتّب ترتيباً ممتازاً.
+    return f"""أنت كاتب محترف يفرّغ تسجيلاً صوتياً بالعربية (محاضرة أو شرح أو ملاحظات أو حديث) إلى نص مكتوب سليم ومرتّب ترتيباً ممتازاً.
 
 الأسلوب المطلوب: {VOICE_STYLES.get(style, VOICE_STYLES['tidy'])}
 اللغة: {VOICE_LANGS.get(lang, VOICE_LANGS['spoken'])}
 
 القواعد:
 1. لا تضف معلومة ولا رأياً ليس في التسجيل.
-2. قسّم الكلام إلى فقرات قصيرة، كل فقرة فكرة واحدة، وضع عنواناً قصيراً كلما انتقل المتكلم إلى موضوع جديد.
+2. الفقرات: اجمع كل الجمل المتتالية التي تتكلم عن نفس الفكرة أو نفس الشخص في فقرة واحدة متصلة (عادةً من 2 إلى 6 جمل)، ولا تجعل كل جملة قصيرة في سطر وحدها. ضع عنواناً قصيراً فقط عند انتقال واضح إلى موضوع جديد (مثل: الانتقال للكلام عن شخص آخر أو محور آخر)، والعنوان مأخوذ من الكلام نفسه (مثل اسم الشخص).
 3. المصطلحات الإنجليزية اكتبها بالإنجليزية بإملاء صحيح، والأرقام أرقاماً.
 4. إذا تكلم شخص آخر غير المتكلم الأساسي (مثل سؤال من طالب) فابدأ فقرته بكلمة «سؤال:» أو «مداخلة:».
 5. الجزء غير المسموع اكتبه: [غير واضح]. لا تخمّن.
-6. انتبه للإملاء ولا تسقط حرفاً من أي كلمة.
+6. انتبه للإملاء ولا تسقط حرفاً من أي كلمة، وانقل أسماء الأشخاص كما وردت.
 
 صيغة الإخراج (مهمة جداً): كل سطر يبدأ بوقت بدايته في التسجيل بين قوسين مربعين بالأرقام اللاتينية بالشكل [دقائق:ثواني] مثل [03:12] (أو [ساعات:دقائق:ثواني] بعد الساعة الأولى)،
 ثم إما عنوان بالشكل: # العنوان، أو نص الفقرة كاملة في نفس السطر.
@@ -637,14 +638,14 @@ def parse_voice(out, dur):
     return segs
 
 
-WHISPER_MODELS = ["whisper-large-v3", "whisper-large-v3-turbo"]
+WHISPER_MODELS = ["whisper-large-v3"]  # the faster «turbo» skips whole stretches of Saudi speech: not used
 WHISPER_REST = {}
 # phrases the recognizer sometimes invents on silence or at the end of a piece
 JUNK = re.compile(r"ترجمة\s+نانسي|نانسي\s+قنقر|اشترك(?:وا)?\s+في\s+القناة|شكرا\s+(?:لكم\s+)?(?:على\s+)?(?:ل?المشاهدة|للمتابعة)|"
                   r"لا\s+تنس(?:وا)?\s+الاشتراك|^\s*موسيقى\s*$|تفريغ\s+.{0,20}قنقر|subscribe|subtitles", re.I)
 
 
-def cut_points(path, dur, target=40.0, lo=25.0, hi=55.0):
+def cut_points(path, dur, target=60.0, lo=40.0, hi=80.0):
     """Split points every ~40 seconds, each placed in a natural pause of the speech when there is one."""
     pauses = []
     try:
@@ -684,7 +685,7 @@ def _whisper_piece(path):
             with open(path, "rb") as fh:
                 r = requests.post("https://api.groq.com/openai/v1/audio/transcriptions",
                                   headers={"Authorization": f"Bearer {GROQ_KEY}"},
-                                  files={"file": (Path(path).name, fh, "audio/mpeg")},
+                                  files={"file": (Path(path).name, fh, "audio/flac")},
                                   data={"model": model, "language": "ar", "response_format": "verbose_json", "temperature": "0"},
                                   timeout=(10, 90))
         except requests.exceptions.RequestException as e:
@@ -715,9 +716,9 @@ def groq_transcribe(path, dur=0.0, job=None):
         a, b = cuts[k], cuts[k + 1]
         if b - a < 0.4:
             continue
-        out = folder / f"piece-{Path(path).stem}-{k}.mp3"
+        out = folder / f"piece-{Path(path).stem}-{k}.flac"  # lossless: compressed audio made the recognizer miss names and words
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{a:.2f}", "-t", f"{b - a:.2f}", "-i", str(path),
-                        "-ac", "1", "-ar", "16000", "-b:a", "32k", str(out)], capture_output=True, timeout=120)
+                        "-vn", "-ac", "1", "-ar", "16000", "-c:a", "flac", str(out)], capture_output=True, timeout=120)
         if out.exists() and out.stat().st_size > 500:
             pieces.append((a, out))
     if not pieces:
@@ -737,7 +738,7 @@ def groq_transcribe(path, dur=0.0, job=None):
     return raw
 
 
-GROQ_CHAT_MODELS = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
+GROQ_CHAT_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]  # «qwen» allows only ~1000 written words a minute: too little
 GROQ_REST = {}  # model -> time until its per-minute free limit has room again
 
 
@@ -758,7 +759,7 @@ def _reset_secs(v):
     return int(h or 0) * 3600 + int(mi or 0) * 60 + float(se or 0)
 
 
-def groq_chat(prompt, budget=90, max_tokens=8000):
+def groq_chat(prompt, budget=90, max_tokens=8000, effort="low"):
     """Groq's free text assistants (very fast). Each has a small per-minute limit, so requests are spread over all of them."""
     import requests
     start, last = time.time(), "?"
@@ -768,7 +769,7 @@ def groq_chat(prompt, budget=90, max_tokens=8000):
                 continue
             body = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.2, "max_tokens": max_tokens}
             if "gpt-oss" in model:
-                body["reasoning_effort"] = "low"
+                body["reasoning_effort"] = effort
             t0 = time.time()
             try:
                 r = requests.post("https://api.groq.com/openai/v1/chat/completions", json=body,
@@ -827,7 +828,8 @@ def groq_tidy(style, lang, raw, dur, job=None):
         if n > 1:
             prompt += (f"\n\nهذا هو الجزء {k + 1} من {n} من نفس التسجيل: اكتب هذا الجزء فقط، "
                        + ("" if k == 0 else "ولا تبدأ بمقدمة، وضع عنواناً فقط إذا بدأ موضوع جديد فعلاً."))
-        return parse_voice(groq_chat(prompt, budget=max(60, 25 * n)), dur)
+        # more «thinking» understands the dialect better; on long recordings less, to stay inside the per-minute limit
+        return parse_voice(groq_chat(prompt, budget=max(60, 25 * n), effort="medium" if n <= 2 else "low"), dur)
 
     with ThreadPoolExecutor(max_workers=min(3, n)) as ex:
         parts = list(ex.map(one, range(n)))
@@ -873,12 +875,14 @@ def paragraphs(raw):
 def tidy_prompt(style, lang, raw):
     lines = "\n".join(f"[{fmt_ts(t)}] {x}" for t, x in raw)
     return voice_prompt(style, lang).replace(
-        "يفرّغ تسجيلاً صوتياً (غالباً محاضرة أو شرح بالعربية) إلى نص مكتوب",
-        "يحوّل تفريغاً آلياً لتسجيل صوتي (غالباً محاضرة أو شرح بالعربية) إلى نص مكتوب") + f"""
+        "يفرّغ تسجيلاً صوتياً بالعربية (محاضرة أو شرح أو ملاحظات أو حديث) إلى نص مكتوب",
+        "يحوّل تفريغاً آلياً لتسجيل صوتي بالعربية (محاضرة أو شرح أو ملاحظات أو حديث) إلى نص مكتوب") + f"""
 
 ملاحظات على التفريغ الآلي التالي:
-- كل سطر يبدأ بوقته في التسجيل. استخدم في كل سطر تكتبه وقت أول جزء من الكلام الذي تعتمد عليه.
-- التفريغ الآلي يخطئ كثيراً في الحروف المتقاربة في النطق (ك وق، ن وم، ب وت، ذ وز، ض وظ) وفي المصطلحات. راجع كل كلمة: إذا كانت بلا معنى في السياق فاكتب الكلمة الصحيحة المقصودة (مثلاً: «بنقمل» صوابها «بنكمل»، و«الدائمين» في سياق القوائم المالية صوابها «الدائنين»، و«إداء الرأي» صوابها «إبداء الرأي»).
+- كل سطر يبدأ بوقته في التسجيل، والأسطر مقطوعة آلياً في أماكن عشوائية (قد تنقطع الجملة بين سطرين): اجمعها في فقرات. وقت الفقرة هو وقت أول سطر منها.
+- افهم موضوع التسجيل من الكلام نفسه أولاً (قد يكون عن المحاسبة أو عن تحفيظ القرآن أو غيره)، ثم صحّح على أساسه.
+- التفريغ الآلي يخطئ كثيراً في الحروف المتقاربة في النطق (ك وق، ن وم، ب وت، ذ وز، ض وظ، ج وي) وفي الأسماء والمصطلحات. راجع كل كلمة: إذا كانت بلا معنى في السياق فاكتب الكلمة الصحيحة المقصودة (أمثلة: «بنقمل» صوابها «بنكمل»، و«بالمجرم ممتاز» صوابها «بالمجمل ممتاز»، و«سبع الماضي» صوابها «الأسبوع الماضي»، و«اللهم لك حمد» صوابها «اللهم لك الحمد»).
+- إذا تكرر اسم شخص بأكثر من شكل بسبب خطأ السماع (مثل «ابراهيم الخليفي» و«برهما خليفي»)، فاكتبه بالشكل الصحيح في كل مكان.
 - المصطلحات الإنجليزية المكتوبة بحروف عربية (مثل «الأودت») اكتبها كما ينطقها المتكلم بالعربية بإملاء سليم أو بالإنجليزية إن كانت مصطلحاً معروفاً (مثل audit).
 - لا تحذف أي جملة أو معلومة أو مثال أو سؤال من التفريغ أبداً، حتى في الأسلوب المرتّب: الحذف للحشو والتكرار فقط.
 
@@ -901,17 +905,30 @@ def transcribe_worker(job, files, style, lang):
             if dur > MAX_AUDIO_MIN * 60:
                 raise RuntimeError("too_long")
             small = src.with_suffix(".small.mp3")
-            kbps = "32k" if dur <= 40 * 60 else "20k"  # spoken voice stays clear; the request stays small
+            kbps = "48k" if dur <= 40 * 60 else "24k"  # spoken voice stays clear; the request stays small
             r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000",
                                 "-b:a", kbps, str(small)], capture_output=True, timeout=600)
             if r.returncode != 0 or not small.exists() or small.stat().st_size < 1000:
                 raise RuntimeError("bad_audio")
             dur = dur or audio_seconds(small)
             note = ""
-            if GROQ_KEY:
+            segs = None
+            if GEMINI_KEY and GROQ_KEY:
+                # Google hears Saudi speech best: one quick try (no waiting when it is busy), Groq right after if not
+                job["stage"] = "المساعد الذكي يسمع ويكتب…" if n == 1 else job["stage"]
+                try:
+                    segs = parse_voice(ask_gemini(voice_prompt(style, lang), audio_paths=[small], timeout=60 + dur / 4,
+                                                  budget=60 + dur / 4, rounds=1, retry_busy=False), dur) or None
+                    if segs:
+                        alog(f"[assistant] voice by google: {len(segs)} lines")
+                except ClaudeUnavailable as e:
+                    alog(f"[assistant] google busy, using groq: {e!r}"[:160])
+            if segs:
+                pass
+            elif GROQ_KEY:
                 # 1) hear it fast with Groq, 2) tidy the words with the assistant (text only: lighter and quicker)
                 job["stage"] = "نسمع التسجيل ونكتبه…" if n == 1 else job["stage"]
-                raw = groq_transcribe(small, dur, job)
+                raw = groq_transcribe(src, dur, job)  # from the original recording, not the compressed copy
                 segs = None
                 job["stage"] = "نرتّب النص…" if n == 1 else job["stage"]
                 try:
