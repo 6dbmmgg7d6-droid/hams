@@ -245,24 +245,37 @@ def ask_gemini(prompt, image_path=None, image_paths=None):
     for ip in ([image_path] if image_path else []) + list(image_paths or []):
         mime = "image/png" if str(ip).lower().endswith(".png") else "image/jpeg"
         parts.append({"inline_data": {"mime_type": mime, "data": base64.b64encode(Path(ip).read_bytes()).decode()}})
-    body = {"contents": [{"role": "user", "parts": parts}], "generationConfig": {"temperature": 0.2}}
+    def body_for(model, think):
+        cfg = {"temperature": 0.2}
+        if think:  # reading and arranging text needs little «thinking»; skipping it makes the answer much faster
+            cfg["thinkingConfig"] = {"thinkingBudget": 0} if model.startswith("gemini-2") else {"thinkingLevel": "low"}
+        return {"contents": [{"role": "user", "parts": parts}], "generationConfig": cfg}
+
     last = None
     for model in gemini_models():
-        for attempt in range(4):
+        think = True
+        for attempt in range(5):
+            t0 = time.time()
             r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                              headers={"x-goog-api-key": GEMINI_KEY}, json=body, timeout=180)  # works for old and new key formats
+                              headers={"x-goog-api-key": GEMINI_KEY}, json=body_for(model, think), timeout=240)
+            print(f"[assistant] {model} {r.status_code} in {time.time() - t0:.0f}s", flush=True)
+            if r.status_code == 400 and think and "think" in r.text.lower():
+                think = False  # this version doesn't accept the setting: ask again the normal way
+                continue
             if r.status_code == 404:
                 last = f"model {model} not found"
                 break
             if r.status_code in (429, 500, 503):
                 last = f"busy {r.status_code}"
-                time.sleep(4 * (attempt + 1))
+                if r.status_code == 429 and attempt >= 1:
+                    break  # this version's free limit is used up: try the next version
+                time.sleep(3 * (attempt + 1))
                 continue
             if r.status_code != 200:
                 raise ClaudeUnavailable(f"gemini {r.status_code}: {r.text[:200]}")
             data = r.json()
             try:
-                return "".join(x.get("text", "") for x in data["candidates"][0]["content"]["parts"])
+                return "".join(x.get("text", "") for x in data["candidates"][0]["content"]["parts"] if not x.get("thought"))
             except Exception:
                 raise ClaudeUnavailable("gemini empty")
     raise ClaudeUnavailable(f"gemini failed: {last}")
