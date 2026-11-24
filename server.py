@@ -257,7 +257,7 @@ def alog(msg):
     del ASSIST_LOG[:-30]
 
 
-def ask_gemini(prompt, image_path=None, image_paths=None):
+def ask_gemini(prompt, image_path=None, image_paths=None, audio_paths=None, timeout=None):
     """One request to Google's free Gemini assistant; tries the next model name if one is unknown,
     and waits a little when the free limit is hit for a moment."""
     import base64
@@ -267,6 +267,8 @@ def ask_gemini(prompt, image_path=None, image_paths=None):
     for ip in ([image_path] if image_path else []) + list(image_paths or []):
         mime = "image/png" if str(ip).lower().endswith(".png") else "image/jpeg"
         parts.append({"inline_data": {"mime_type": mime, "data": base64.b64encode(Path(ip).read_bytes()).decode()}})
+    for ap in audio_paths or []:
+        parts.append({"inline_data": {"mime_type": "audio/mp3", "data": base64.b64encode(Path(ap).read_bytes()).decode()}})
     def body_for(model, level):
         cfg = {"temperature": 0.2}
         if level:  # reading and arranging text needs almost no «thinking»; skipping it makes the answer much faster
@@ -282,7 +284,7 @@ def ask_gemini(prompt, image_path=None, image_paths=None):
             try:  # a version that is slow today is skipped instead of making the reader wait minutes
                 r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                                   headers={"x-goog-api-key": GEMINI_KEY}, json=body_for(model, levels[0]),
-                                  timeout=(10, 120 if "lite" in model else 75))
+                                  timeout=(10, timeout or (120 if "lite" in model else 75)))
             except requests.exceptions.RequestException as e:
                 alog(f"[assistant] {model} no answer ({time.time() - t0:.0f}s): {type(e).__name__}")
                 return ("timeout", True)
@@ -545,6 +547,141 @@ def manifest():
                                    {"src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png"}]})
 
 
+# ---------------------------------------------------------------- voice → text
+AUDIO_EXT = (".mp3", ".m4a", ".wav", ".aac", ".ogg", ".oga", ".opus", ".webm", ".mp4", ".3gp", ".amr",
+             ".flac", ".caf", ".mpeg", ".mpga", ".wma", ".mov")
+MAX_AUDIO_MIN = 90
+
+VOICE_STYLES = {
+    "tidy": "مرتّب: اكتب كل ما قيل بترتيبه، واحذف الحشو والتلعثم والتكرار (مثل: يعني، امم، إيه، اللي هو، والجمل المقطوعة التي يعيدها المتكلم)، "
+            "ورتّب الجملة إن لزم دون تغيير المعنى، ولا تحذف أي معلومة أو مثال أو رقم أو تعريف.",
+    "short": "مختصر: مثل المرتّب، لكن اختصر كل فقرة إلى أهم ما فيها، مع الإبقاء على كل المعلومات المهمة والتعريفات والأرقام والأمثلة الأساسية.",
+    "summary": "مرتّب مع ملخص: ابدأ بعنوان «الملخص» وتحته من 5 إلى 10 نقاط قصيرة لأهم ما قيل، كل نقطة تبدأ بـ «- » ووقتها هو وقت أول ذكر لها، "
+               "ثم اكتب الكلام كاملاً مرتّباً: احذف الحشو والتلعثم والتكرار دون حذف أي معلومة.",
+    "verbatim": "حرفي: اكتب كل كلمة كما قيلت بالضبط، بما فيها التكرار والحشو، وأضف علامات الترقيم فقط.",
+}
+VOICE_LANGS = {
+    "spoken": "اكتب الكلام بلهجته كما قيل، ولا تحوّله إلى الفصحى، لكن بإملاء عربي سليم.",
+    "fusha": "حوّل الكلام إلى فصحى مبسّطة وواضحة، مع الحفاظ على المعنى والمصطلحات وأسلوب الشرح.",
+}
+
+
+def voice_prompt(style, lang):
+    return f"""أنت كاتب محترف يفرّغ تسجيلاً صوتياً (غالباً محاضرة أو شرح بالعربية) إلى نص مكتوب سليم ومرتّب ترتيباً ممتازاً.
+
+الأسلوب المطلوب: {VOICE_STYLES.get(style, VOICE_STYLES['tidy'])}
+اللغة: {VOICE_LANGS.get(lang, VOICE_LANGS['spoken'])}
+
+القواعد:
+1. لا تضف معلومة ولا رأياً ليس في التسجيل.
+2. قسّم الكلام إلى فقرات قصيرة، كل فقرة فكرة واحدة، وضع عنواناً قصيراً كلما انتقل المتكلم إلى موضوع جديد.
+3. المصطلحات الإنجليزية اكتبها بالإنجليزية بإملاء صحيح، والأرقام أرقاماً.
+4. إذا تكلم شخص آخر غير المتكلم الأساسي (مثل سؤال من طالب) فابدأ فقرته بكلمة «سؤال:» أو «مداخلة:».
+5. الجزء غير المسموع اكتبه: [غير واضح]. لا تخمّن.
+6. انتبه للإملاء ولا تسقط حرفاً من أي كلمة.
+
+صيغة الإخراج (مهمة جداً): كل سطر يبدأ بوقت بدايته في التسجيل بين قوسين مربعين بالأرقام اللاتينية بالشكل [دقائق:ثواني] مثل [03:12] (أو [ساعات:دقائق:ثواني] بعد الساعة الأولى)،
+ثم إما عنوان بالشكل: # العنوان، أو نص الفقرة كاملة في نفس السطر.
+مثال:
+[00:00] # المقدمة
+[00:04] نص الفقرة الأولى.
+لا مقدمة ولا خاتمة ولا أي تنسيق آخر."""
+
+
+def audio_seconds(path):
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)],
+                           capture_output=True, text=True, timeout=60)
+        return float(r.stdout.strip())
+    except Exception:
+        return 0.0
+
+
+def parse_voice(out, dur):
+    segs = []
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("```"):
+            continue
+        m = re.match(r"^\[?\s*(\d{1,2})\s*:\s*(\d{1,2})(?:\s*:\s*(\d{1,2}))?\s*\]?\s*:?\s*(.*)$", line)
+        if m:
+            a, b, c, rest = m.groups()
+            t = int(a) * 3600 + int(b) * 60 + int(c) if c else int(a) * 60 + int(b)
+        else:
+            t, rest = (segs[-1]["t"] if segs else 0), line
+        rest = rest.strip()
+        if not rest:
+            continue
+        head = rest.startswith("#")
+        if head:
+            rest = rest.lstrip("#").strip()
+        if not rest:
+            continue
+        rest = re.sub(r"^[-–•*]\s+", "• ", rest)  # summary points
+        if dur:
+            t = min(t, int(dur))
+        if not m and segs and not head and not segs[-1]["h"]:
+            segs[-1]["x"] += " " + rest  # a paragraph that went on to a second line
+            continue
+        segs.append({"t": t, "h": head, "x": rest})
+    return segs
+
+
+def transcribe_worker(job, files, style, lang):
+    from concurrent.futures import ThreadPoolExecutor
+    try:
+        n = len(files)
+        done = [0]
+        job["stage"] = "نجهّز التسجيل…" if n == 1 else f"نجهّز التسجيلات ({n})"
+        job["progress"] = 0.05
+
+        def one(f):
+            src, name = f
+            dur = audio_seconds(src)
+            if dur > MAX_AUDIO_MIN * 60:
+                raise RuntimeError("too_long")
+            small = src.with_suffix(".small.mp3")
+            kbps = "32k" if dur <= 40 * 60 else "20k"  # spoken voice stays clear; the request stays small
+            r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000",
+                                "-b:a", kbps, str(small)], capture_output=True, timeout=600)
+            if r.returncode != 0 or not small.exists() or small.stat().st_size < 1000:
+                raise RuntimeError("bad_audio")
+            dur = dur or audio_seconds(small)
+            out = ask_gemini(voice_prompt(style, lang), audio_paths=[small], timeout=420)
+            segs = parse_voice(out, dur)
+            if not segs:
+                raise ClaudeUnavailable("empty")
+            done[0] += 1
+            job["progress"] = 0.1 + 0.85 * done[0] / n
+            job["stage"] = "خلصنا الكتابة…" if done[0] == n else f"كتبنا {done[0]} من {n} تسجيلات"
+            return {"name": name, "dur": round(dur, 1), "segs": segs}
+
+        job["stage"] = "المساعد الذكي يسمع ويكتب…" if n == 1 else f"المساعد الذكي يسمع ويكتب التسجيلات ({n}) مع بعض"
+        job["progress"] = 0.1
+        with ThreadPoolExecutor(max_workers=min(3, n)) as ex:  # each recording is its own request, all at the same time
+            parts = list(ex.map(one, files))
+        lines = []
+        for p in parts:
+            if n > 1:
+                lines.append("# " + p["name"])
+            lines += [("# " if s["h"] else "") + s["x"] for s in p["segs"]]
+        more = "" if n == 1 else (" ومعه تسجيل آخر" if n == 2 else " ومعه " + str(n - 1).translate(str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩")) + " تسجيلات")
+        base = parts[0]["name"] + more
+        job["result"] = {"name": base, "kind": "voice", "parts": parts, "text": "\n".join(lines)}
+        job["progress"] = 1.0
+        job["status"] = "done"
+    except ClaudeUnavailable as e:
+        LAST_AI_ERROR[0] = re.sub(r"(key=|AIza|AQ\.)[\w.-]+", "***", repr(e))[:300]
+        job["status"], job["error"] = "error", "ai_busy"
+    except Exception as e:
+        job["status"] = "error"
+        job["error"] = str(e) if str(e) in ("too_long", "bad_audio") else "failed"
+        job["detail"] = repr(e)[:400]
+    finally:  # the recordings are not kept on the server
+        for src, _ in files:
+            shutil.rmtree(src.parent, ignore_errors=True)
+
+
 # ---------------------------------------------------------------- API
 @app.get("/")
 def index(request: Request):
@@ -568,6 +705,29 @@ async def prepare(file: UploadFile = File(...), use_claude: bool = True):
         subprocess.run(["sips", "-s", "format", "png", str(src), "--out", str(work / "source.png")], capture_output=True)
         src = work / "source.png"
     threading.Thread(target=prepare_worker, args=(job, src, file.filename or "ملف", use_claude), daemon=True).start()
+    return {"job": jid}
+
+
+@app.post("/api/transcribe")
+async def transcribe(files: list[UploadFile] = File(...), style: str = Form("tidy"), lang: str = Form("spoken")):
+    if not GEMINI_KEY:
+        raise HTTPException(400, "voice_needs_key")
+    if not files or len(files) > 8:
+        raise HTTPException(400, "too_many")
+    jid, job = new_job("transcribe")
+    work = JOBS / jid
+    work.mkdir()
+    saved = []
+    for k, f in enumerate(files):
+        ext = Path(f.filename or "").suffix.lower()
+        if ext not in AUDIO_EXT and not (f.content_type or "").startswith(("audio/", "video/")):
+            shutil.rmtree(work, ignore_errors=True)
+            raise HTTPException(400, "bad_type")
+        src = work / f"audio-{k + 1}{ext or '.bin'}"
+        src.write_bytes(await f.read())
+        name = re.sub(r"\.[^.]+$", "", f.filename or "") or f"تسجيل {k + 1}"
+        saved.append((src, name))
+    threading.Thread(target=transcribe_worker, args=(job, saved, style, lang), daemon=True).start()
     return {"job": jid}
 
 
