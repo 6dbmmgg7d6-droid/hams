@@ -385,6 +385,7 @@ body.playing .reel{animation:spin 3s linear infinite}
       <button type="button" class="pill" id="v-hamed" title="يقرأ النص المكتوب بصوت حامد"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9z"/></svg>بصوت حامد</button>
     </div>
   </div>
+  <div class="info" id="v-note" hidden style="max-width:900px;margin:0 auto 14px"></div>
   <div id="v-parts"></div>
 </section>
 
@@ -618,7 +619,7 @@ async function convertVoice(){
       setProgress(Math.max(j.progress, 0.08), j.stage ? toAr(j.stage) : '');
       if (j.status === 'done') {
         S.job = null; S.vfiles = []; renderPicked();
-        var it = saveToLib(j.result.name, j.result.text, '', 'voice');
+        var it = saveToLib(j.result.name, j.result.text, j.result.note || '', 'voice');
         it.kind = 'voice'; it.parts = j.result.parts.map(function(p){ return { name: p.name, dur: p.dur, segs: p.segs }; });
         updateLib(it.id, { kind: 'voice', parts: it.parts });
         for (var k = 0; k < files.length; k++) await blobPut(it.id + ':' + k, files[k]);
@@ -677,6 +678,7 @@ async function openVoice(it){
   var total = (it.parts || []).reduce(function(a, p){ return a + (p.dur || 0); }, 0);
   try { $('v-sub').textContent = 'تفريغ صوتي · ' + new Date(it.ts).toLocaleDateString('ar-SA-u-ca-gregory-nu-arab', { dateStyle: 'medium' }) + (total ? ' · ' + fmt(total) : ''); } catch (e) {}
   $('v-copy').querySelector('span').textContent = 'نسخ النص';
+  $('v-note').textContent = it.note || ''; $('v-note').hidden = !it.note;
   var box = $('v-parts'); box.textContent = '';
   show('voice');
   for (var k = 0; k < (it.parts || []).length; k++) {

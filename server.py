@@ -36,6 +36,7 @@ PARALLEL = 6  # sentences requested from the voice service at the same time
 
 # On the online server these come from its secret settings; on the Mac they are empty and nothing changes.
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GROQ_KEY = os.environ.get("GROQ_API_KEY", "").strip()  # fast free speech-to-text (optional)
 GEMINI_MODELS = [m for m in (os.environ.get("GEMINI_MODEL", ""), "gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash") if m]
 _MODEL_CACHE = {"at": 0, "list": []}
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "").strip()
@@ -636,11 +637,83 @@ def parse_voice(out, dur):
     return segs
 
 
+def groq_transcribe(path):
+    """Groq's free speech recognizer: a whole lecture in seconds. Returns [(start_seconds, text), ...]."""
+    import requests
+    last = ""
+    for model in ("whisper-large-v3", "whisper-large-v3-turbo"):
+        for attempt in range(2):
+            t0 = time.time()
+            try:
+                with open(path, "rb") as fh:
+                    r = requests.post("https://api.groq.com/openai/v1/audio/transcriptions",
+                                      headers={"Authorization": f"Bearer {GROQ_KEY}"},
+                                      files={"file": (Path(path).name, fh, "audio/mpeg")},
+                                      data={"model": model, "language": "ar", "response_format": "verbose_json", "temperature": "0"},
+                                      timeout=(10, 180))
+            except requests.exceptions.RequestException as e:
+                last = type(e).__name__
+                alog(f"[groq] {model} no answer: {last}")
+                continue
+            alog(f"[groq] {model} {r.status_code} in {time.time() - t0:.0f}s")
+            if r.status_code == 200:
+                segs = [(float(x.get("start", 0)), (x.get("text") or "").strip()) for x in r.json().get("segments") or []]
+                segs = [x for x in segs if x[1]]
+                if segs:
+                    return segs
+                last = "empty"
+                break
+            last = f"{r.status_code}: {r.text[:120]}"
+            if r.status_code == 429:
+                break  # this model's free limit: try the other one
+            if r.status_code >= 500:
+                time.sleep(2)
+                continue
+            break
+    raise ClaudeUnavailable(f"groq failed: {last}")
+
+
+def fmt_ts(t):
+    t = int(t)
+    return f"{t // 3600}:{t // 60 % 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t // 60:02d}:{t % 60:02d}"
+
+
+def paragraphs(raw):
+    """Plain recognizer output grouped into readable paragraphs (used for «حرفي», and when the assistant is busy)."""
+    out, cur = [], None
+    for t, x in raw:
+        if cur and (len(cur["x"]) > 320 or (len(cur["x"]) > 160 and re.search(r"[.!؟?]$", cur["x"]))):
+            out.append(cur)
+            cur = None
+        if cur is None:
+            cur = {"t": int(t), "h": False, "x": x}
+        else:
+            cur["x"] += " " + x
+    if cur:
+        out.append(cur)
+    return out
+
+
+def tidy_prompt(style, lang, raw):
+    lines = "\n".join(f"[{fmt_ts(t)}] {x}" for t, x in raw)
+    return voice_prompt(style, lang).replace(
+        "يفرّغ تسجيلاً صوتياً (غالباً محاضرة أو شرح بالعربية) إلى نص مكتوب",
+        "يحوّل تفريغاً آلياً لتسجيل صوتي (غالباً محاضرة أو شرح بالعربية) إلى نص مكتوب") + f"""
+
+ملاحظات على التفريغ الآلي التالي:
+- كل سطر يبدأ بوقته في التسجيل. استخدم في كل سطر تكتبه وقت أول جزء من الكلام الذي تعتمد عليه.
+- التفريغ الآلي قد يخطئ في بعض الكلمات أو يكتب المصطلحات الإنجليزية بحروف عربية: صحّحها بحسب السياق (خصوصاً المصطلحات المحاسبية والمالية)، ولا تحذف شيئاً من المعنى.
+
+التفريغ الآلي:
+{lines}"""
+
+
 def transcribe_worker(job, files, style, lang):
     from concurrent.futures import ThreadPoolExecutor
     try:
         n = len(files)
         done = [0]
+        notes = []
         job["stage"] = "نجهّز التسجيل…" if n == 1 else f"نجهّز التسجيلات ({n})"
         job["progress"] = 0.05
 
@@ -656,10 +729,29 @@ def transcribe_worker(job, files, style, lang):
             if r.returncode != 0 or not small.exists() or small.stat().st_size < 1000:
                 raise RuntimeError("bad_audio")
             dur = dur or audio_seconds(small)
-            out = ask_gemini(voice_prompt(style, lang), audio_paths=[small], timeout=min(420, 90 + dur / 4), budget=max(150, 60 + dur / 3))
-            segs = parse_voice(out, dur)
+            note = ""
+            if GROQ_KEY:
+                # 1) hear it fast with Groq, 2) tidy the words with the assistant (text only: lighter and quicker)
+                job["stage"] = "نسمع التسجيل ونكتبه…" if n == 1 else job["stage"]
+                raw = groq_transcribe(small)
+                segs = None
+                if style != "verbatim" and GEMINI_KEY:
+                    job["stage"] = "نرتّب النص…" if n == 1 else job["stage"]
+                    try:
+                        segs = parse_voice(ask_gemini(tidy_prompt(style, lang, raw), timeout=min(300, 60 + dur / 6),
+                                                      budget=max(60, 30 + dur / 8)), dur)
+                    except ClaudeUnavailable as e:
+                        alog(f"[assistant] tidy skipped: {e!r}"[:200])
+                    if not segs:
+                        note = "المساعد الذكي كان زحمة، فطلع لك النص مثل ما انقال بدون ترتيب. تقدر تعيد الكتابة بعد شوي عشان يترتب."
+                segs = segs or paragraphs(raw)
+            else:
+                out = ask_gemini(voice_prompt(style, lang), audio_paths=[small], timeout=min(420, 90 + dur / 4), budget=max(150, 60 + dur / 3))
+                segs = parse_voice(out, dur)
             if not segs:
                 raise ClaudeUnavailable("empty")
+            if note:
+                notes.append(note)
             done[0] += 1
             job["progress"] = 0.1 + 0.85 * done[0] / n
             job["stage"] = "خلصنا الكتابة…" if done[0] == n else f"كتبنا {done[0]} من {n} تسجيلات"
@@ -676,7 +768,7 @@ def transcribe_worker(job, files, style, lang):
             lines += [("# " if s["h"] else "") + s["x"] for s in p["segs"]]
         more = "" if n == 1 else (" ومعه تسجيل آخر" if n == 2 else " ومعه " + str(n - 1).translate(str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩")) + " تسجيلات")
         base = parts[0]["name"] + more
-        job["result"] = {"name": base, "kind": "voice", "parts": parts, "text": "\n".join(lines)}
+        job["result"] = {"name": base, "kind": "voice", "parts": parts, "text": "\n".join(lines), "note": notes[0] if notes else ""}
         job["progress"] = 1.0
         job["status"] = "done"
     except ClaudeUnavailable as e:
@@ -719,7 +811,7 @@ async def prepare(file: UploadFile = File(...), use_claude: bool = True):
 
 @app.post("/api/transcribe")
 async def transcribe(files: list[UploadFile] = File(...), style: str = Form("tidy"), lang: str = Form("spoken")):
-    if not GEMINI_KEY:
+    if not (GEMINI_KEY or GROQ_KEY):
         raise HTTPException(400, "voice_needs_key")
     if not files or len(files) > 8:
         raise HTTPException(400, "too_many")
