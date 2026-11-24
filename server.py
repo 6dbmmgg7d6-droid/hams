@@ -38,6 +38,7 @@ PARALLEL = 6  # sentences requested from the voice service at the same time
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODELS = [m for m in (os.environ.get("GEMINI_MODEL", ""), "gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash") if m]
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "").strip()
+LAST_AI_ERROR = [""]
 
 app = FastAPI()
 
@@ -331,6 +332,7 @@ def prepare_worker(job, src: Path, name: str, use_claude: bool):
             except ClaudeUnavailable as e:
                 result = []
                 print("[assistant]", repr(e)[:300], flush=True)
+                LAST_AI_ERROR[0] = re.sub(r"(key=|AIza|AQ\.)[\w.-]+", "***", repr(e))[:300]
                 note = "تعذّر التجهيز الذكي هذه المرة، فقُرئت الصفحات كما هي." if GEMINI_KEY else ("Claude غير مربوط في هذا الجهاز، فقُرئت الصفحات كما هي بدون تجهيز محاسبي للجداول والقيود. "
                         "شغّل ملف «ربط Claude» مرة واحدة ثم أعد التحويل للحصول على أفضل قراءة.") if str(e) in ("login", "not_found") else \
                        "تعذّر التجهيز عن طريق Claude هذه المرة، فقُرئت الصفحات كما هي."
@@ -564,7 +566,8 @@ def tts(body: TTSIn):
 
 @app.get("/api/status")
 def status():
-    return {"ok": True, "claude": bool(find_claude())}
+    # says only whether a Google key is set (never the key itself), and the last assistant error if any
+    return {"ok": True, "claude": bool(find_claude()), "gemini_key": bool(GEMINI_KEY), "assistant_error": LAST_AI_ERROR[0]}
 
 
 # ---------------------------------------------------------------- background recording
