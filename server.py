@@ -637,40 +637,216 @@ def parse_voice(out, dur):
     return segs
 
 
-def groq_transcribe(path):
-    """Groq's free speech recognizer: a whole lecture in seconds. Returns [(start_seconds, text), ...]."""
+WHISPER_MODELS = ["whisper-large-v3", "whisper-large-v3-turbo"]
+WHISPER_REST = {}
+# phrases the recognizer sometimes invents on silence or at the end of a piece
+JUNK = re.compile(r"ترجمة\s+نانسي|نانسي\s+قنقر|اشترك(?:وا)?\s+في\s+القناة|شكرا\s+(?:لكم\s+)?(?:على\s+)?(?:ل?المشاهدة|للمتابعة)|"
+                  r"لا\s+تنس(?:وا)?\s+الاشتراك|^\s*موسيقى\s*$|تفريغ\s+.{0,20}قنقر|subscribe|subtitles", re.I)
+
+
+def cut_points(path, dur, target=40.0, lo=25.0, hi=55.0):
+    """Split points every ~40 seconds, each placed in a natural pause of the speech when there is one."""
+    pauses = []
+    try:
+        r = subprocess.run(["ffmpeg", "-i", str(path), "-af", "silencedetect=n=-32dB:d=0.35", "-f", "null", "-"],
+                           capture_output=True, text=True, timeout=300)
+        st = None
+        for line in r.stderr.splitlines():
+            m = re.search(r"silence_start: ([\d.]+)", line)
+            if m:
+                st = float(m.group(1))
+            m = re.search(r"silence_end: ([\d.]+)", line)
+            if m and st is not None:
+                pauses.append((st + float(m.group(1))) / 2)
+                st = None
+    except Exception:
+        pass
+    cuts, last = [0.0], 0.0
+    while dur - last > hi:
+        cands = [x for x in pauses if last + lo <= x <= last + hi]
+        nxt = min(cands, key=lambda x: abs(x - last - target)) if cands else last + target
+        cuts.append(nxt)
+        last = nxt
+    return cuts + [dur]
+
+
+def _whisper_piece(path):
     import requests
     last = ""
-    for model in ("whisper-large-v3", "whisper-large-v3-turbo"):
-        for attempt in range(2):
-            t0 = time.time()
-            try:
-                with open(path, "rb") as fh:
-                    r = requests.post("https://api.groq.com/openai/v1/audio/transcriptions",
-                                      headers={"Authorization": f"Bearer {GROQ_KEY}"},
-                                      files={"file": (Path(path).name, fh, "audio/mpeg")},
-                                      data={"model": model, "language": "ar", "response_format": "verbose_json", "temperature": "0"},
-                                      timeout=(10, 180))
-            except requests.exceptions.RequestException as e:
-                last = type(e).__name__
-                alog(f"[groq] {model} no answer: {last}")
-                continue
-            alog(f"[groq] {model} {r.status_code} in {time.time() - t0:.0f}s")
-            if r.status_code == 200:
-                segs = [(float(x.get("start", 0)), (x.get("text") or "").strip()) for x in r.json().get("segments") or []]
-                segs = [x for x in segs if x[1]]
-                if segs:
-                    return segs
-                last = "empty"
-                break
-            last = f"{r.status_code}: {r.text[:120]}"
-            if r.status_code == 429:
-                break  # this model's free limit: try the other one
-            if r.status_code >= 500:
-                time.sleep(2)
-                continue
+    for attempt in range(8):
+        now = time.time()
+        free = [m for m in WHISPER_MODELS if WHISPER_REST.get(m, 0) <= now]
+        if not free:
+            time.sleep(max(0.5, min(WHISPER_REST.values()) - now))
+            continue
+        model = free[attempt % len(free)]
+        try:
+            with open(path, "rb") as fh:
+                r = requests.post("https://api.groq.com/openai/v1/audio/transcriptions",
+                                  headers={"Authorization": f"Bearer {GROQ_KEY}"},
+                                  files={"file": (Path(path).name, fh, "audio/mpeg")},
+                                  data={"model": model, "language": "ar", "response_format": "verbose_json", "temperature": "0"},
+                                  timeout=(10, 90))
+        except requests.exceptions.RequestException as e:
+            last = type(e).__name__
+            continue
+        if r.status_code == 200:
+            return [(float(x.get("start", 0)), (x.get("text") or "").strip()) for x in r.json().get("segments") or []]
+        last = f"{r.status_code}: {r.text[:120]}"
+        if r.status_code == 429:
+            wait = _reset_secs(r.headers.get("retry-after", "")) or _reset_secs(r.headers.get("x-ratelimit-reset-requests", "")) or 10
+            WHISPER_REST[model] = time.time() + min(wait, 60) + 0.3
+        elif r.status_code >= 500:
+            time.sleep(1.5)
+        else:
             break
     raise ClaudeUnavailable(f"groq failed: {last}")
+
+
+def groq_transcribe(path, dur=0.0, job=None):
+    """Groq's free speech recognizer. The recording is cut into ~40-second pieces at pauses (on long audio the
+    recognizer sometimes skips whole stretches), and all pieces are heard at once. Returns [(start_seconds, text), ...]."""
+    from concurrent.futures import ThreadPoolExecutor
+    dur = dur or audio_seconds(path)
+    cuts = cut_points(path, dur)
+    folder = Path(path).parent
+    pieces = []
+    for k in range(len(cuts) - 1):
+        a, b = cuts[k], cuts[k + 1]
+        if b - a < 0.4:
+            continue
+        out = folder / f"piece-{Path(path).stem}-{k}.mp3"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{a:.2f}", "-t", f"{b - a:.2f}", "-i", str(path),
+                        "-ac", "1", "-ar", "16000", "-b:a", "32k", str(out)], capture_output=True, timeout=120)
+        if out.exists() and out.stat().st_size > 500:
+            pieces.append((a, out))
+    if not pieces:
+        raise RuntimeError("bad_audio")
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=min(8, len(pieces))) as ex:
+        results = list(ex.map(lambda pc: _whisper_piece(pc[1]), pieces))
+    alog(f"[groq] heard {len(pieces)} pieces in {time.time() - t0:.1f}s")
+    raw = []
+    for (a, _), segs in zip(pieces, results):
+        for t, x in segs:
+            x = JUNK.sub("", x).strip(" .،")
+            if x and not (raw and raw[-1][1] == x):  # the recognizer also repeats a line at a piece's end
+                raw.append((a + t, x))
+    if not raw:
+        raise ClaudeUnavailable("empty")
+    return raw
+
+
+GROQ_CHAT_MODELS = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
+GROQ_REST = {}  # model -> time until its per-minute free limit has room again
+
+
+def _reset_secs(v):
+    """«20.98s», «1m26.4s», «495ms» → seconds."""
+    v = (v or "").strip()
+    if not v:
+        return 0.0
+    if v.endswith("ms") and "m" not in v[:-2]:
+        return float(v[:-2]) / 1000
+    m = re.match(r"(?:(\d+)h)?(?:(\d+)m(?!s))?(?:([\d.]+)s)?$", v)
+    if not m:
+        try:
+            return float(v)
+        except ValueError:
+            return 10.0
+    h, mi, se = m.groups()
+    return int(h or 0) * 3600 + int(mi or 0) * 60 + float(se or 0)
+
+
+def groq_chat(prompt, budget=90, max_tokens=8000):
+    """Groq's free text assistants (very fast). Each has a small per-minute limit, so requests are spread over all of them."""
+    import requests
+    start, last = time.time(), "?"
+    while time.time() - start < budget:
+        for model in GROQ_CHAT_MODELS:
+            if GROQ_REST.get(model, 0) > time.time():
+                continue
+            body = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.2, "max_tokens": max_tokens}
+            if "gpt-oss" in model:
+                body["reasoning_effort"] = "low"
+            t0 = time.time()
+            try:
+                r = requests.post("https://api.groq.com/openai/v1/chat/completions", json=body,
+                                  headers={"Authorization": f"Bearer {GROQ_KEY}"},
+                                  timeout=(10, max(10, min(120, budget - (time.time() - start)))))
+            except requests.exceptions.RequestException as e:
+                last = type(e).__name__
+                GROQ_REST[model] = time.time() + 5
+                alog(f"[groq-chat] {model} no answer: {last}")
+                continue
+            alog(f"[groq-chat] {model} {r.status_code} in {time.time() - t0:.1f}s")
+            if r.status_code == 200:
+                try:
+                    txt = r.json()["choices"][0]["message"]["content"] or ""
+                except Exception:
+                    txt = ""
+                txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
+                if txt:
+                    return txt
+                last = "empty"
+                GROQ_REST[model] = time.time() + 3
+                continue
+            last = f"{r.status_code}: {r.text[:120]}"
+            if r.status_code == 429:
+                wait = _reset_secs(r.headers.get("retry-after", "")) or _reset_secs(r.headers.get("x-ratelimit-reset-tokens", "")) or 15
+                GROQ_REST[model] = time.time() + min(wait, 70) + 0.5
+            elif r.status_code == 413:
+                raise ClaudeUnavailable("too_big")
+            else:
+                GROQ_REST[model] = time.time() + 5
+        soonest = min([GROQ_REST.get(m, 0) for m in GROQ_CHAT_MODELS])
+        pause = max(0.5, soonest - time.time())
+        if time.time() - start + pause >= budget:
+            break
+        time.sleep(pause)
+    raise ClaudeUnavailable(f"groq chat failed: {last}")
+
+
+def groq_tidy(style, lang, raw, dur, job=None):
+    """Tidy a long recording in pieces (each fits the per-minute limit), all at once; then a short summary if asked."""
+    from concurrent.futures import ThreadPoolExecutor
+    chunks, cur, size = [], [], 0
+    for seg in raw:
+        if cur and size + len(seg[1]) > 2800:
+            chunks.append(cur)
+            cur, size = [], 0
+        cur.append(seg)
+        size += len(seg[1])
+    if cur:
+        chunks.append(cur)
+    base_style = "tidy" if style == "summary" else style
+    n = len(chunks)
+
+    def one(k):
+        prompt = tidy_prompt(base_style, lang, chunks[k])
+        if n > 1:
+            prompt += (f"\n\nهذا هو الجزء {k + 1} من {n} من نفس التسجيل: اكتب هذا الجزء فقط، "
+                       + ("" if k == 0 else "ولا تبدأ بمقدمة، وضع عنواناً فقط إذا بدأ موضوع جديد فعلاً."))
+        return parse_voice(groq_chat(prompt, budget=max(60, 25 * n)), dur)
+
+    with ThreadPoolExecutor(max_workers=min(3, n)) as ex:
+        parts = list(ex.map(one, range(n)))
+    segs = [x for p in parts for x in p]
+    if not segs:
+        raise ClaudeUnavailable("empty")
+    if style == "summary":
+        body = "\n".join(f"[{fmt_ts(x['t'])}] " + ("# " if x["h"] else "") + x["x"][:220] for x in segs)[:9000]
+        try:
+            pts = parse_voice(groq_chat(
+                "هذا نص مرتب لمحاضرة، وكل سطر يبدأ بوقته. اكتب ملخصاً من 5 إلى 10 نقاط قصيرة لأهم ما قيل، "
+                "بنفس لغة النص ولهجته، كل نقطة في سطر بالشكل: [دقائق:ثواني] - النقطة، ووقتها هو وقت أول ذكر لها. "
+                "لا مقدمة ولا خاتمة.\n\n" + body, budget=60, max_tokens=2000), dur)
+            pts = [x for x in pts if not x["h"]]
+            if pts:
+                segs = [{"t": 0, "h": True, "x": "الملخص"}] + pts + segs
+        except ClaudeUnavailable as e:
+            alog(f"[groq-chat] summary skipped: {e!r}"[:200])
+    return segs
 
 
 def fmt_ts(t):
@@ -702,7 +878,9 @@ def tidy_prompt(style, lang, raw):
 
 ملاحظات على التفريغ الآلي التالي:
 - كل سطر يبدأ بوقته في التسجيل. استخدم في كل سطر تكتبه وقت أول جزء من الكلام الذي تعتمد عليه.
-- التفريغ الآلي قد يخطئ في بعض الكلمات أو يكتب المصطلحات الإنجليزية بحروف عربية: صحّحها بحسب السياق (خصوصاً المصطلحات المحاسبية والمالية)، ولا تحذف شيئاً من المعنى.
+- التفريغ الآلي يخطئ كثيراً في الحروف المتقاربة في النطق (ك وق، ن وم، ب وت، ذ وز، ض وظ) وفي المصطلحات. راجع كل كلمة: إذا كانت بلا معنى في السياق فاكتب الكلمة الصحيحة المقصودة (مثلاً: «بنقمل» صوابها «بنكمل»، و«الدائمين» في سياق القوائم المالية صوابها «الدائنين»، و«إداء الرأي» صوابها «إبداء الرأي»).
+- المصطلحات الإنجليزية المكتوبة بحروف عربية (مثل «الأودت») اكتبها كما ينطقها المتكلم بالعربية بإملاء سليم أو بالإنجليزية إن كانت مصطلحاً معروفاً (مثل audit).
+- لا تحذف أي جملة أو معلومة أو مثال أو سؤال من التفريغ أبداً، حتى في الأسلوب المرتّب: الحذف للحشو والتكرار فقط.
 
 التفريغ الآلي:
 {lines}"""
@@ -733,16 +911,19 @@ def transcribe_worker(job, files, style, lang):
             if GROQ_KEY:
                 # 1) hear it fast with Groq, 2) tidy the words with the assistant (text only: lighter and quicker)
                 job["stage"] = "نسمع التسجيل ونكتبه…" if n == 1 else job["stage"]
-                raw = groq_transcribe(small)
+                raw = groq_transcribe(small, dur, job)
                 segs = None
-                if style != "verbatim" and GEMINI_KEY:
-                    job["stage"] = "نرتّب النص…" if n == 1 else job["stage"]
+                job["stage"] = "نرتّب النص…" if n == 1 else job["stage"]
+                try:
+                    segs = groq_tidy(style, lang, raw, dur, job)
+                except ClaudeUnavailable as e:
+                    alog(f"[groq-chat] tidy failed: {e!r}"[:200])
+                if not segs and GEMINI_KEY:  # last try: Google's assistant, briefly
                     try:
-                        segs = parse_voice(ask_gemini(tidy_prompt(style, lang, raw), timeout=min(300, 60 + dur / 6),
-                                                      budget=max(60, 30 + dur / 8)), dur)
+                        segs = parse_voice(ask_gemini(tidy_prompt(style, lang, raw), timeout=60, budget=45), dur)
                     except ClaudeUnavailable as e:
                         alog(f"[assistant] tidy skipped: {e!r}"[:200])
-                    if not segs:
+                if not segs:
                         note = "المساعد الذكي كان زحمة، فطلع لك النص مثل ما انقال بدون ترتيب. تقدر تعيد الكتابة بعد شوي عشان يترتب."
                 segs = segs or paragraphs(raw)
             else:
