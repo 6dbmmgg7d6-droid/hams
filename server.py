@@ -201,16 +201,16 @@ def parse_pages(text, nums):
     return [{"n": p["n"], "text": "\n".join(p["lines"]).strip()} for p in out if "\n".join(p["lines"]).strip()]
 
 
-def ask_gemini(prompt, image_path=None):
+def ask_gemini(prompt, image_path=None, image_paths=None):
     """One request to Google's free Gemini assistant; tries the next model name if one is unknown,
     and waits a little when the free limit is hit for a moment."""
     import base64
     import requests
 
     parts = [{"text": prompt}]
-    if image_path:
-        mime = "image/png" if str(image_path).lower().endswith(".png") else "image/jpeg"
-        parts.append({"inline_data": {"mime_type": mime, "data": base64.b64encode(Path(image_path).read_bytes()).decode()}})
+    for ip in ([image_path] if image_path else []) + list(image_paths or []):
+        mime = "image/png" if str(ip).lower().endswith(".png") else "image/jpeg"
+        parts.append({"inline_data": {"mime_type": mime, "data": base64.b64encode(Path(ip).read_bytes()).decode()}})
     body = {"contents": [{"role": "user", "parts": parts}], "generationConfig": {"temperature": 0.2}}
     last = None
     for model in GEMINI_MODELS:
@@ -285,10 +285,43 @@ def prepare_worker(job, src: Path, name: str, use_claude: bool):
                         g["n"] = p["n"]
                     return got
 
+                GEMINI_BATCH = 8  # pages per request: saves the free daily limit (a 3-page file = 1 request)
+
+                def page_block(batch):
+                    nums = [p["n"] for p in batch]
+                    parts = [PROMPT_RULES, "",
+                             f"الصور المرفقة هي الصفحات التالية بالترتيب: {'، '.join(map(str, nums))}. "
+                             "اقرأ كل صفحة بعناية على حدة، وأخرج لكل صفحة عنوانها === الصفحة N === ثم نصها، "
+                             "ولا تدمج صفحتين ولا تتخطَّ أي صفحة."]
+                    for p in batch:
+                        if p["raw"]:
+                            parts.append(f"\nللمساعدة فقط، نص آلي للصفحة {p['n']} (قد يكون ترتيبه خاطئاً، والمرجع هو الصورة):\n{p['raw'][:4000]}")
+                    out = ask_gemini("\n".join(parts), image_paths=[work / p["img"] for p in batch])
+                    got = {g["n"]: g for g in parse_pages(out, nums) if g["n"] in nums and g["text"].strip()}
+                    for p in batch:  # a page that came back missing or empty is read again, alone
+                        if p["n"] not in got:
+                            for g in one_page(p):
+                                got[p["n"]] = g
+                    return [got[p["n"]] for p in batch if p["n"] in got]
+
+                if GEMINI_KEY:
+                    batches = [pages[b:b + GEMINI_BATCH] for b in range(0, len(pages), GEMINI_BATCH)]
+                    for k, batch in enumerate(batches):
+                        if job["cancel"]:
+                            raise RuntimeError("cancelled")
+                        job["stage"] = f"المساعد الذكي يقرأ الصفحات ({min((k + 1) * GEMINI_BATCH, n)} من {n})"
+                        job["progress"] = 0.15 + 0.8 * k / len(batches)
+                        result.extend(page_block(batch))
+                    if not result:
+                        raise ClaudeUnavailable("empty")
+                    pages_to_do = []
+                else:
+                    pages_to_do = pages
+
                 done = [0]
                 job["stage"] = f"المساعد الذكي يقرأ الصفحات كلها مع بعض ({n})"
-                with ThreadPoolExecutor(max_workers=min(4 if GEMINI_KEY else 6, len(pages))) as ex:
-                    futs = [ex.submit(one_page, p) for p in pages]
+                with ThreadPoolExecutor(max_workers=max(1, min(6, len(pages_to_do)))) as ex:
+                    futs = [ex.submit(one_page, p) for p in pages_to_do]
                     for f in futs:
                         result.extend(f.result())
                         done[0] += 1
