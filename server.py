@@ -257,7 +257,7 @@ def alog(msg):
     del ASSIST_LOG[:-30]
 
 
-def ask_gemini(prompt, image_path=None, image_paths=None, audio_paths=None, timeout=None):
+def ask_gemini(prompt, image_path=None, image_paths=None, audio_paths=None, timeout=None, budget=150):
     """One request to Google's free Gemini assistant; tries the next model name if one is unknown,
     and waits a little when the free limit is hit for a moment."""
     import base64
@@ -275,16 +275,23 @@ def ask_gemini(prompt, image_path=None, image_paths=None, audio_paths=None, time
             cfg["thinkingConfig"] = {"thinkingBudget": 0} if model.startswith("gemini-2") else {"thinkingLevel": level}
         return {"contents": [{"role": "user", "parts": parts}], "generationConfig": cfg}
 
+    start = time.time()
+
+    def left():
+        return budget - (time.time() - start)
+
     def ask_model(model):
         """One version: the answer text, or (reason, busy) when it can't answer now."""
         levels = ["minimal", "low", None]  # least thinking first; step down only if this version refuses the setting
         last = "?"
         for attempt in range(6):
+            if left() < 5:
+                return ("out of time", False)
             t0 = time.time()
             try:  # a version that is slow today is skipped instead of making the reader wait minutes
                 r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                                   headers={"x-goog-api-key": GEMINI_KEY}, json=body_for(model, levels[0]),
-                                  timeout=(10, timeout or (120 if "lite" in model else 75)))
+                                  timeout=(10, max(5, min(timeout or (120 if "lite" in model else 75), left()))))
             except requests.exceptions.RequestException as e:
                 alog(f"[assistant] {model} no answer ({time.time() - t0:.0f}s): {type(e).__name__}")
                 return ("timeout", True)
@@ -308,7 +315,8 @@ def ask_gemini(prompt, image_path=None, image_paths=None, audio_paths=None, time
                 return ("minute limit", True)
             if r.status_code in (500, 503):
                 last = f"busy {r.status_code}"
-                if attempt >= 1:
+                alog(f"[assistant] {model} says: {r.text[:140]!r}")
+                if attempt >= 1 or time.time() - t0 > 15:  # slow «busy» answers: don't wait for a second one
                     return (last, True)  # still busy after one retry: try the next version
                 time.sleep(2)
                 continue
@@ -334,9 +342,10 @@ def ask_gemini(prompt, image_path=None, image_paths=None, audio_paths=None, time
                 return got
             last, b = got
             busy = busy or b
-        if not busy or rnd == 3:
+        if not busy or rnd == 3 or left() < 20:
             break
         wait = max(5, min(40, (soonest - time.time()) if soonest else 10 * (rnd + 1)))
+        wait = min(wait, max(0, left() - 15))
         alog(f"[assistant] all versions busy: waiting {wait:.0f}s, round {rnd + 2}")
         time.sleep(wait)
     raise ClaudeUnavailable(f"gemini failed: {last}")
@@ -647,7 +656,7 @@ def transcribe_worker(job, files, style, lang):
             if r.returncode != 0 or not small.exists() or small.stat().st_size < 1000:
                 raise RuntimeError("bad_audio")
             dur = dur or audio_seconds(small)
-            out = ask_gemini(voice_prompt(style, lang), audio_paths=[small], timeout=420)
+            out = ask_gemini(voice_prompt(style, lang), audio_paths=[small], timeout=min(420, 90 + dur / 4), budget=max(150, 60 + dur / 3))
             segs = parse_voice(out, dur)
             if not segs:
                 raise ClaudeUnavailable("empty")
