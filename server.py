@@ -843,7 +843,7 @@ def _whisper_piece(path):
             with open(path, "rb") as fh:
                 r = requests.post("https://api.groq.com/openai/v1/audio/transcriptions",
                                   headers={"Authorization": f"Bearer {GROQ_KEY}"},
-                                  files={"file": (Path(path).name, fh, "audio/flac")},
+                                  files={"file": (Path(path).name, fh)},
                                   data={"model": model, "language": "ar", "response_format": "verbose_json", "temperature": "0"},
                                   timeout=(10, 90))
         except requests.exceptions.RequestException as e:
@@ -867,6 +867,15 @@ def groq_transcribe(path, dur=0.0, job=None):
     recognizer sometimes skips whole stretches), and all pieces are heard at once. Returns [(start_seconds, text), ...]."""
     from concurrent.futures import ThreadPoolExecutor
     dur = dur or audio_seconds(path)
+    if dur <= 150 and Path(path).stat().st_size < 24 * 1024 * 1024 and \
+            Path(path).suffix.lower() in (".m4a", ".mp3", ".wav", ".webm", ".ogg", ".flac", ".mp4", ".mpeg", ".mpga", ".opus"):
+        t0 = time.time()
+        segs = _whisper_piece(path)  # short: one piece, sent as it is (no converting on the slow server)
+        alog(f"[groq] heard whole file in {time.time() - t0:.1f}s")
+        raw = [(t, JUNK.sub("", x).strip(" .،")) for t, x in segs]
+        raw = [(t, x) for t, x in raw if x]
+        if raw:
+            return raw
     cuts = cut_points(path, dur)
     folder = Path(path).parent
     pieces = []
@@ -917,7 +926,7 @@ def _reset_secs(v):
     return int(h or 0) * 3600 + int(mi or 0) * 60 + float(se or 0)
 
 
-def groq_chat(prompt, budget=90, max_tokens=8000, effort="low", models=None):
+def groq_chat(prompt, budget=90, max_tokens=8000, effort="low", models=None, temperature=0.2):
     """Groq's free text assistants (very fast). Each has a small per-minute limit, so requests are spread over all of them."""
     import requests
     start, last = time.time(), "?"
@@ -926,9 +935,11 @@ def groq_chat(prompt, budget=90, max_tokens=8000, effort="low", models=None):
         for model in order:
             if GROQ_REST.get(model, 0) > time.time():
                 continue
-            body = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.2, "max_tokens": max_tokens}
+            body = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": temperature, "max_tokens": max_tokens}
             if "gpt-oss" in model:
                 body["reasoning_effort"] = effort
+            elif "qwen" in model:
+                body["reasoning_effort"] = "none"  # a short answer: no «thinking» (its written-words limit is small)
             t0 = time.time()
             try:
                 r = requests.post("https://api.groq.com/openai/v1/chat/completions", json=body,
@@ -949,12 +960,16 @@ def groq_chat(prompt, budget=90, max_tokens=8000, effort="low", models=None):
                 if txt:
                     return txt
                 last = "empty"
+                fin = (r.json().get("choices") or [{}])[0].get("finish_reason")
+                alog(f"[groq-chat] {model} empty answer ({fin})")
                 GROQ_REST[model] = time.time() + 3
                 continue
             last = f"{r.status_code}: {r.text[:120]}"
             if r.status_code == 429:
                 wait = _reset_secs(r.headers.get("retry-after", "")) or _reset_secs(r.headers.get("x-ratelimit-reset-tokens", "")) or 15
-                GROQ_REST[model] = time.time() + min(wait, 70) + 0.5
+                daily = "per day" in r.text or "TPD" in r.text or "RPD" in r.text
+                # the daily limit: rest it until it really has room (the next assistant answers meanwhile)
+                GROQ_REST[model] = time.time() + (wait if daily else min(wait, 70)) + 0.5
             elif r.status_code == 413:
                 GROQ_REST[model] = time.time() + 20
             else:
@@ -983,7 +998,7 @@ SHAPE_PROMPT = """أمامك أسطر مرقّمة من تفريغ تسجيل ص
 {"headings": [{"line": 3, "title": "..."}], "paragraphs": [1, 8], "continues": [2, 5]}
 - headings: كلما بدأ المتكلم الكلام عن شخص جديد، ضع عنواناً هو اسم الشخص كما ورد في الكلام (وهذا يشمل أول شخص). وإذا لم يكن الكلام عن أشخاص، فعنوان قصير من الكلام نفسه عند الانتقال لموضوع جديد واضح. "line" هو أول سطر في الكلام عنه. لا تضع عنواناً لجملة الترحيب في أول التسجيل ولا لجملة الشكر أو الدعاء في آخره، ولا عناوين عامة مثل: تحية، مقدمة، ملاحظة، صديقي، ختام.
 - paragraphs: أرقام الأسطر التي تبدأ بها فقرة جديدة داخل كلام نفس الشخص أو الموضوع عند انتقال الفكرة. الفقرة من 2 إلى 6 أسطر عادةً. (أول سطر بعد كل عنوان يبدأ فقرة تلقائياً فلا تكرره.)
-- continues: أرقام الأسطر التي لا تنتهي عندها الجملة فعلاً، بل يكمل معناها في السطر الذي بعده (فتصير نقطتها فاصلة).
+- continues: أرقام الأسطر التي انقطعت فيها الجملة في منتصفها ولم يكتمل معناها أبداً (مثل سطر ينتهي بـ «إن كان في» أو «قلت إنه» أو «بحكم»)، فتصير نقطتها فاصلة. هذه قليلة عادةً، والسطر الذي معناه مكتمل لا تضعه هنا حتى لو كان الكلام بعده عن نفس الموضوع.
 
 الأسطر:
 """
@@ -1094,7 +1109,9 @@ def choose_words(raw, alts, budget, vocab=None):
               "اكتب لكل رقم سطراً بالشكل: الرقم: أ أو الرقم: ب، ولا شيء غير ذلك.\n\n"
               + "\n".join(f"{n + 1}) «{q[4]}» ← أ: {q[2]} / ب: {q[3]}" for n, q in enumerate(qs)))
     try:
-        out = groq_chat(prompt, budget=min(60, budget), max_tokens=5000, effort="medium", models=["openai/gpt-oss-120b"])
+        out = groq_chat(prompt, budget=min(60, budget), max_tokens=5000, effort="medium",
+                        models=["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
+                        temperature=0)  # the same answer every time
     except ClaudeUnavailable as e:
         alog(f"[groq-chat] word choice skipped: {e!r}"[:160])
         return [(t, " ".join(w)) for (t, _), w in zip(raw, lines)]
@@ -1118,8 +1135,6 @@ def line_tidy(raw, style, accurate, budget, vocab=None, alts=None):
     from concurrent.futures import ThreadPoolExecutor
     numbered = "\n".join(f"{i + 1}| {x}" for i, (t, x) in enumerate(raw))
     with_alt = "\n".join(f"{i + 1}| {x}" + (f"\nب: {alts[i]}" if alts and alts[i] else "") for i, (t, x) in enumerate(raw))
-    if alts:  # where the two hearings disagree on a word, the assistant only picks one of the two
-        raw = choose_words(raw, alts, budget, vocab)
     clean_p = CLEAN_PROMPT.format(kind="دقيق" if accurate else "آلي", alt="", fix="" if accurate else
                                   "- إذا كانت كلمة بلا أي معنى في السياق بسبب خطأ السماع، فاكتب الكلمة الصحيحة المقصودة، فقط عند الوضوح التام.\n") + numbered
     shape_p = SHAPE_PROMPT + numbered
@@ -1128,8 +1143,9 @@ def line_tidy(raw, style, accurate, budget, vocab=None, alts=None):
         got = {}
         try:
             # spelling needs the bigger assistant: it waits for it rather than taking the smaller one
-            for line in groq_chat(clean_p, budget=budget, max_tokens=6000, effort="medium",
-                                  models=["openai/gpt-oss-120b"]).splitlines():
+            # spelling is simple: little «thinking», so it and the word choice fit the per-minute limit together
+            for line in groq_chat(clean_p, budget=budget, max_tokens=4500, effort="low",
+                                  models=["openai/gpt-oss-120b", "openai/gpt-oss-20b"]).splitlines():
                 if line.strip().startswith("ب:"):
                     continue
                 m = re.match(r"^\s*\[?(\d+)\]?\s*[|｜:.)-]\s*(.*)$", line.strip())
@@ -1141,17 +1157,20 @@ def line_tidy(raw, style, accurate, budget, vocab=None, alts=None):
 
     def shape():
         try:
-            txt = groq_chat(shape_p, budget=budget, max_tokens=4000, effort="medium",
-                            models=["openai/gpt-oss-20b", "openai/gpt-oss-120b"])
+            # «qwen» answers this short layout question in about a second, and has its own separate limit
+            txt = groq_chat(shape_p, budget=budget, max_tokens=900, effort="medium", temperature=0,
+                            models=["qwen/qwen3.8-27b", "openai/gpt-oss-20b"])
             m = re.search(r"\{.*\}", txt, re.S)
             return json.loads(m.group(0)) if m else {}
         except Exception as e:
             alog(f"[groq-chat] shape skipped: {e!r}"[:160])
             return {}
 
-    with ThreadPoolExecutor(max_workers=2) as ex:
+    with ThreadPoolExecutor(max_workers=3) as ex:  # word choice, spelling and shape all at once
+        fw = ex.submit(choose_words, raw, alts, budget, vocab) if alts else None
         fc, fs = ex.submit(clean), ex.submit(shape)
         got, sh = fc.result(), fs.result()
+        chosen = fw.result() if fw else raw
     if not got and not sh:
         raise ClaudeUnavailable("line tidy: nothing came back")
     heads = {}
@@ -1182,6 +1201,8 @@ def line_tidy(raw, style, accurate, budget, vocab=None, alts=None):
             cont.add(int(v) - 1)
         except Exception:
             pass
+    if len(cont) > 0.4 * len(raw):  # it marked nearly everything: not trustworthy, keep the full stops
+        cont = set()
     segs, para, pstart, last = [], [], None, ""
 
     def flush():
@@ -1191,6 +1212,7 @@ def line_tidy(raw, style, accurate, budget, vocab=None, alts=None):
         para, pstart = [], None
 
     for k, (t, heard) in enumerate(raw):
+        heard = chosen[k][1]  # the main hearing with the words picked from the second one
         txt = keep_words(heard, got[k], accurate) if k in got else heard
         if style != "verbatim":
             txt = drop_fillers(txt)
@@ -1243,7 +1265,7 @@ def groq_tidy(style, lang, raw, dur, job=None, accurate=False, vocab=None, alts=
     """Tidy a long recording in pieces (each fits the per-minute limit), all at once; then a short summary if asked."""
     from concurrent.futures import ThreadPoolExecutor
     chunks, cur, size, achunks, acur = [], [], 0, [], []
-    limit = 1500 if alts else 2400  # two hearings per line: smaller pieces to stay inside the per-minute limit
+    limit = 2400  # one piece for a recording of a few minutes
     for i, seg in enumerate(raw):
         if cur and size + len(seg[1]) > limit:
             chunks.append(cur)
@@ -1358,12 +1380,21 @@ def transcribe_worker(job, files, style, lang, vocab=None):
             if dur > MAX_AUDIO_MIN * 60:
                 raise RuntimeError("too_long")
             small = src.with_suffix(".small.mp3")
-            kbps = "48k" if dur <= 40 * 60 else "24k"  # spoken voice stays clear; the request stays small
-            r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000",
-                                "-b:a", kbps, str(small)], capture_output=True, timeout=600)
-            if r.returncode != 0 or not small.exists() or small.stat().st_size < 1000:
+
+            def make_small():  # a compressed copy: only Google's path needs it (the free server converts slowly)
+                if small.exists():
+                    return small
+                kbps = "48k" if dur <= 40 * 60 else "24k"
+                r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000",
+                                    "-b:a", kbps, str(small)], capture_output=True, timeout=600)
+                if r.returncode != 0 or not small.exists() or small.stat().st_size < 1000:
+                    raise RuntimeError("bad_audio")
+                return small
+
+            if not dur:  # e.g. a recording made in the browser has no length written in it
+                dur = audio_seconds(make_small())
+            if not dur:
                 raise RuntimeError("bad_audio")
-            dur = dur or audio_seconds(small)
             note = ""
             segs = None
             raw, accurate, second = None, False, None
@@ -1388,7 +1419,7 @@ def transcribe_worker(job, files, style, lang, vocab=None):
                 # Google hears Saudi speech well: one quick try (no waiting when it is busy), Groq right after if not
                 job["stage"] = "المساعد الذكي يسمع ويكتب…" if n == 1 else job["stage"]
                 try:
-                    segs = parse_voice(ask_gemini(voice_prompt(style, lang), audio_paths=[small], timeout=60 + dur / 4,
+                    segs = parse_voice(ask_gemini(voice_prompt(style, lang), audio_paths=[make_small()], timeout=60 + dur / 4,
                                                   budget=60 + dur / 4, rounds=1, retry_busy=False), dur) or None
                     if segs:
                         alog(f"[assistant] voice by google: {len(segs)} lines")
@@ -1416,7 +1447,7 @@ def transcribe_worker(job, files, style, lang, vocab=None):
                         note = "المساعد الذكي كان زحمة، فطلع لك النص مثل ما انقال بدون ترتيب. تقدر تعيد الكتابة بعد شوي عشان يترتب."
                 segs = segs or paragraphs(raw)
             else:
-                out = ask_gemini(voice_prompt(style, lang), audio_paths=[small], timeout=min(420, 90 + dur / 4), budget=max(150, 60 + dur / 3))
+                out = ask_gemini(voice_prompt(style, lang), audio_paths=[make_small()], timeout=min(420, 90 + dur / 4), budget=max(150, 60 + dur / 3))
                 segs = parse_voice(out, dur)
             if not segs:
                 raise ClaudeUnavailable("empty")
