@@ -481,7 +481,7 @@ def prepare_worker(job, src: Path, name: str, use_claude: bool):
                 # (a 27-page file = 4 requests, so Google's per-minute and daily free limits are not hit)
                 GEMINI_BATCH = max(1, min(8, -(-len(pages) // 3)))
                 # with a plan B ready, Google gets one quick try instead of waiting through its busy spells
-                QUICK = dict(budget=120, rounds=1, retry_busy=False) if (GROQ_KEY and tess_ok() and not has_ocr()) else {}
+                QUICK = dict(budget=90, timeout=45, rounds=1, retry_busy=False) if (GROQ_KEY and tess_ok() and not has_ocr() and len(pages) <= 4) else {}
 
                 def page_block(batch):
                     nums = [p["n"] for p in batch]
@@ -530,7 +530,8 @@ def prepare_worker(job, src: Path, name: str, use_claude: bool):
                 print("[assistant]", repr(e)[:300], flush=True)
                 LAST_AI_ERROR[0] = re.sub(r"(key=|AIza|AQ\.)[\w.-]+", "***", repr(e))[:300]
                 if GEMINI_KEY and not has_ocr():
-                    if not (GROQ_KEY and tess_ok()):
+                    if not (GROQ_KEY and tess_ok()) or len(pages) > 4:
+                        # the free server reads about a page a minute: plan B only for small files
                         # no reliable way to read the page images here, and a PDF's own text layer often comes out
                         # reversed with missing letters: say so clearly instead of reading nonsense
                         raise RuntimeError("ai_busy")
