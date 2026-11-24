@@ -1057,6 +1057,7 @@ def drop_fillers(t):
     return t
 
 
+DAYS = {"السبت", "الاحد", "الاثنين", "الثلاثاء", "الاربعاء", "الخميس", "الجمعه"}
 SPOKEN_FIX = {"الاربع": "الأربعاء", "الربوع": "الأربعاء", "الثلوث": "الثلاثاء", "الخميسه": "الخميس"}  # spoken day names
 
 
@@ -1065,6 +1066,7 @@ def choose_words(raw, alts, budget, vocab=None):
     assistant («الربع» or «الاربع»?). It can only answer أ or ب, so nothing new can be written in."""
     import difflib
     known = {_skeleton_word(w) for v in (vocab or []) for w in v.split()}
+    known |= DAYS  # days of the week: one hearing caught a day name → it is the day (e.g. «الربع» / «الأربعاء»)
     qs = []  # (line, word index in the main hearing, main word, other word, context)
     sure = []  # the second hearing has one of the user's own words: taken without asking
     for k, ((t, a), b) in enumerate(zip(raw, alts)):
