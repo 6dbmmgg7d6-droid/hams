@@ -542,10 +542,15 @@ function chunkLong(s, max){
 /* sentences with natural pauses: only a breath between sentences, a bit more after a heading or a new page */
 function buildSents(text){
   var out = [], page = 0, ln = 0, newPage = false;
+  /* headings are marked by the assistant with «#»; older text without marks keeps the old guess */
+  var marked = /^\s*#+\s*\S/m.test(String(text));
   String(text).split(/\n+/).forEach(function(rawLine){
     var line = rawLine.trim(); if (!line) return;
     var m = line.match(/^=+\s*الصفحة\s*([0-9٠-٩]+)\s*=+$/);
     if (m) { page = parseInt(toLat(m[1]), 10); newPage = true; return; }
+    if (/^=+\s*الصفحة[^=]*=+$/.test(line)) return;
+    var hashHead = /^#+\s*/.test(line);
+    if (hashHead) { line = line.replace(/^#+\s*/, '').trim(); if (!line) return; }
     ln++;
     var safe = line.replace(/(\d)\.(\d)/g, '$1\u0001$2').replace(/ر\.س\./g, 'ر\u0001س\u0001').replace(/ر\.س/g, 'ر\u0001س');
     var parts = safe.match(/[^.!؟?؛]+[.!؟?؛]*/g) || [safe];
@@ -555,17 +560,13 @@ function buildSents(text){
       if (!/[؀-ۿA-Za-z0-9]/.test(p)) return;
       chunkLong(p, 180).forEach(function(c){ lineSents.push(c); });
     });
-    var merged = [];
-    lineSents.forEach(function(s){
-      var last = merged[merged.length - 1];
-      if (last && (last.length < 40 || s.length < 25) && (last + ' ' + s).length <= 180) merged[merged.length - 1] = last + ' ' + s;
-      else merged.push(s);
-    });
-    var isHeading = merged.length === 1 && merged[0].length < 50 && !/[،,]/.test(merged[0]);
+    /* every sentence stays on its own (never glued to the next one), so each gets its own breath */
+    var merged = lineSents;
+    var isHeading = marked ? hashHead : (merged.length === 1 && merged[0].length < 50 && !/[،,]/.test(merged[0]));
     merged.forEach(function(s, i){
       if (out.length) {
         var prev = out[out.length - 1];
-        prev.pause = newPage && i === 0 ? 0.35 : (i === 0 ? (prev.heading ? 0.2 : 0.06) : 0);
+        prev.pause = newPage && i === 0 ? 0.35 : (prev.heading ? 0.2 : 0.06);
       }
       out.push({ t: s, say: speakable(s), page: page || 1, ln: ln, pause: 0.6, heading: isHeading && i === 0 });
       if (i === 0) newPage = false;
