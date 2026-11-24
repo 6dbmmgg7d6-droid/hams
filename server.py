@@ -954,28 +954,61 @@ def groq_chat(prompt, budget=90, max_tokens=8000, effort="low"):
     raise ClaudeUnavailable(f"groq chat failed: {last}")
 
 
-LINE_PROMPT = """أمامك تفريغ {kind} لتسجيل صوتي باللهجة السعودية، مقسّم إلى أسطر مرقّمة. مهمتك تنظيفه فقط، لا إعادة كتابته.
-
-لكل سطر اكتب: رقمه ثم | ثم السطر بعد التنظيف. التنظيف المسموح فقط:
-- تصحيح الإملاء: التاء المربوطة (ملاحظه ← ملاحظة)، والهمزات (اذكر ← أذكر، انه ← أنه)، والألف المقصورة.
-- وضع علامات الترقيم (، . ؟ :).
-{fillers}{fix}ممنوع منعاً باتاً: تغيير أي كلمة أخرى، أو تحويل اللهجة للفصحى (اترك مثل: أبيك، ما يجي، يروح، شوي، وحنا، كلمته... كما هي)، أو حذف جملة، أو إضافة كلام، أو وضع التشكيل.
-
-وبين الأسطر ضع:
-- سطراً فارغاً حيث تبدأ فقرة جديدة (فكرة جديدة أو الكلام عن شخص آخر). الفقرة عادةً 2 إلى 6 أسطر، فلا تجعل كل سطر فقرة وحده.
-- سطراً يبدأ بـ # ثم عنوان قصير من الكلام نفسه (مثل اسم الشخص أو الموضوع) قبل أول فقرة في موضوع جديد فقط، ولا تضع عنواناً لجملة الختام أو التحية.
-
-لا تكتب أي شيء آخر.
+CLEAN_PROMPT = """أمامك أسطر مرقّمة من تفريغ {kind} لتسجيل صوتي باللهجة السعودية.
+لكل سطر اكتب رقمه ثم | ثم نفس كلمات السطر بالضبط وبنفس ترتيبها، مع تصحيح الإملاء والترقيم فقط:
+- الإملاء: التاء المربوطة في آخر الكلمة (ملاحظه ← ملاحظة)، والهمزات (اذكر ← أذكر، انه ← أنه، الى ← إلى)، والألف المقصورة.
+- الترقيم داخل السطر: فاصلة (،) بين الجمل المتصلة، و(؟) بعد السؤال، و(:) قبل كلام منقول. اترك علامة آخر السطر كما هي.
+{fix}ممنوع: حذف أي كلمة أو تغييرها أو تبديلها بمرادف، وتحويل اللهجة للفصحى (اترك: هذي، أبيك، ما يجي، وحنا، شوي، إيه، اللي... كما هي)، وإضافة كلام أو تنوين أو تشكيل.
+لا تكتب أي شيء آخر غير الأسطر.
 
 الأسطر:
 """
-HARAKAT = re.compile(r"[\u064B-\u0652\u0670]")
+
+SHAPE_PROMPT = """أمامك أسطر مرقّمة من تفريغ تسجيل صوتي باللهجة السعودية (ملاحظات أو محاضرة أو حديث).
+النقاط في آخر الأسطر وُضعت آلياً عند كل وقفة صوت، فكثير منها في غير مكانه.
+أعد JSON فقط بهذا الشكل:
+{"headings": [{"line": 3, "title": "..."}], "paragraphs": [1, 8], "continues": [2, 5]}
+- headings: كلما بدأ المتكلم الكلام عن شخص جديد، ضع عنواناً هو اسم الشخص كما ورد في الكلام (وهذا يشمل أول شخص). وإذا لم يكن الكلام عن أشخاص، فعنوان قصير من الكلام نفسه عند الانتقال لموضوع جديد واضح. "line" هو أول سطر في الكلام عنه. لا تضع عنواناً لجملة الترحيب في أول التسجيل ولا لجملة الشكر أو الدعاء في آخره، ولا عناوين عامة مثل: تحية، مقدمة، ملاحظة، صديقي، ختام.
+- paragraphs: أرقام الأسطر التي تبدأ بها فقرة جديدة داخل كلام نفس الشخص أو الموضوع عند انتقال الفكرة. الفقرة من 2 إلى 6 أسطر عادةً. (أول سطر بعد كل عنوان يبدأ فقرة تلقائياً فلا تكرره.)
+- continues: أرقام الأسطر التي لا تنتهي عندها الجملة فعلاً، بل يكمل معناها في السطر الذي بعده (فتصير نقطتها فاصلة).
+
+الأسطر:
+"""
+HARAKAT = re.compile(r"[ً-ْٰ]")
+
+
+def _skeleton_word(w):
+    w = HARAKAT.sub("", w)
+    w = re.sub("[أإآٱ]", "ا", w).replace("ة", "ه").replace("ى", "ي").replace("ؤ", "و").replace("ئ", "ي").replace("ـ", "")
+    return "".join(re.findall(r"[ء-ي0-9A-Za-z]+", w))
+
+
+def keep_words(orig, cleaned, accurate):
+    """Take the assistant's spelling and punctuation, but never its word changes: word by word, anything it dropped or
+    changed comes back exactly as heard, and nothing it added is kept."""
+    import difflib
+    o = orig.split()
+    c = HARAKAT.sub("", cleaned).split()
+    ok, ck = [_skeleton_word(w) for w in o], [_skeleton_word(w) for w in c]
+    out = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ok, ck, autojunk=False).get_opcodes():
+        if tag == "equal":
+            out += c[j1:j2]
+        elif tag in ("replace", "delete"):
+            if not accurate and tag == "replace" and (i2 - i1) == (j2 - j1) == 1:
+                out += c[j1:j2]  # the weaker recognizer: a single misheard word may be corrected
+            else:
+                out += o[i1:i2]
+        else:  # inserted: only punctuation is welcome
+            out += [w for w in c[j1:j2] if not ck[j1 + c[j1:j2].index(w)]]
+    return " ".join(out)
 
 
 def drop_fillers(t):
     """«يعني» and hesitation sounds as filler (not «وش يعني؟»)."""
     t = re.sub(r"(?<!وش )(?<!ايش )(?<!إيش )(?<!شو )(?<!ماذا )(?<!ما )\bيعني\b(?!\s*[؟?])[،,]?\s*", "", t)
     t = re.sub(r"\b(?:ام+|امم+|مم+|اه+|آه+|ااا+)\b[،,]?\s*", "", t)
+    t = re.sub(r"(?<!\S)(\S+)( \1)+(?!\S)", r"\1", t)  # a word said twice in a row
     t = re.sub(r"\s+([،,.؟?!:])", r"\1", re.sub(r"\s{2,}", " ", t))
     t = re.sub(r"([،,])\s*([.؟?!])", r"\2", t)
     t = re.sub(r"^[،,\s]+", "", t).strip()
@@ -983,41 +1016,61 @@ def drop_fillers(t):
 
 
 def line_tidy(raw, style, accurate, budget):
-    """Keep the speaker's own words: the assistant only fixes spelling and punctuation line by line, and marks where
-    paragraphs and headings go. Any line it drops or garbles is put back as it was heard."""
-    prompt = LINE_PROMPT.format(
-        kind="دقيق" if accurate else "آلي",
-        fillers="" if style == "verbatim" else "- حذف كلمات الحشو فقط: يعني، امم، اه، إيه (إذا كانت حشواً)، والكلمة المكررة مرتين متتاليتين.\n",
-        fix="" if accurate else "- إذا كانت كلمة بلا أي معنى في السياق بسبب خطأ السماع، فاكتب الكلمة الصحيحة المقصودة، وهذا فقط عند الوضوح التام.\n",
-    ) + "\n".join(f"{i + 1}| {x}" for i, (t, x) in enumerate(raw))
-    # room for its «thinking» plus the text itself, still inside the per-minute limit
-    out = groq_chat(prompt, budget=budget, max_tokens=6000, effort="medium")
-    got, order = {}, []  # line number -> text; order keeps the breaks and headings
-    for line in out.splitlines():
-        line = line.strip()
-        if not line:
-            order.append(("break", None))
-            continue
-        if line.startswith("#"):
-            h = HARAKAT.sub("", line.lstrip("#").strip()).replace("_", " ").strip(" .:")
-            if h:
-                order.append(("head", h))
-            continue
-        m = re.match(r"^\[?(\d+)\]?\s*[|｜:.)-]\s*(.*)$", line)
-        if m:
-            k = int(m.group(1)) - 1
-            if 0 <= k < len(raw) and k not in got:
-                got[k] = HARAKAT.sub("", m.group(2)).strip()
-                order.append(("line", k))
-    if len(got) < max(1, len(raw) // 2):
-        raise ClaudeUnavailable("line tidy: too few lines back")
-    seen = set(k for kind, k in order if kind == "line")
-    for k in range(len(raw)):  # anything missing goes back where it belongs
-        if k not in seen:
-            pos = next((i for i, (kind, v) in enumerate(order) if kind == "line" and v > k), len(order))
-            order.insert(pos, ("line", k))
-            got[k] = raw[k][1]
-    segs, para, pstart, pending_head, last = [], [], None, None, ""
+    """The speaker's own words: one assistant only fixes spelling and punctuation, another only says where the headings,
+    paragraphs and real sentence ends are. Both run at the same time."""
+    from concurrent.futures import ThreadPoolExecutor
+    numbered = "\n".join(f"{i + 1}| {x}" for i, (t, x) in enumerate(raw))
+    clean_p = CLEAN_PROMPT.format(kind="دقيق" if accurate else "آلي", fix="" if accurate else
+                                  "- إذا كانت كلمة بلا أي معنى في السياق بسبب خطأ السماع، فاكتب الكلمة الصحيحة المقصودة، فقط عند الوضوح التام.\n") + numbered
+    shape_p = SHAPE_PROMPT + numbered
+
+    def clean():
+        got = {}
+        try:
+            for line in groq_chat(clean_p, budget=budget, max_tokens=6000, effort="medium").splitlines():
+                m = re.match(r"^\s*\[?(\d+)\]?\s*[|｜:.)-]\s*(.*)$", line.strip())
+                if m and 0 <= int(m.group(1)) - 1 < len(raw):
+                    got[int(m.group(1)) - 1] = m.group(2).strip()
+        except ClaudeUnavailable as e:
+            alog(f"[groq-chat] spelling skipped: {e!r}"[:160])
+        return got
+
+    def shape():
+        try:
+            txt = groq_chat(shape_p, budget=budget, max_tokens=4000, effort="medium")
+            m = re.search(r"\{.*\}", txt, re.S)
+            return json.loads(m.group(0)) if m else {}
+        except Exception as e:
+            alog(f"[groq-chat] shape skipped: {e!r}"[:160])
+            return {}
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        fc, fs = ex.submit(clean), ex.submit(shape)
+        got, sh = fc.result(), fs.result()
+    if not got and not sh:
+        raise ClaudeUnavailable("line tidy: nothing came back")
+    heads = {}
+    for h in sh.get("headings") or []:
+        try:
+            k = int(h.get("line")) - 1
+            title = HARAKAT.sub("", str(h.get("title") or "")).replace("_", " ").strip(" .:#")
+            if 0 <= k < len(raw) and title and title not in ("تحية", "مقدمة", "ملاحظة", "ملاحظات", "ختام", "شكر", "صديقي"):
+                heads[k] = title
+        except Exception:
+            pass
+    starts = set()
+    for v in sh.get("paragraphs") or []:
+        try:
+            starts.add(int(v) - 1)
+        except Exception:
+            pass
+    cont = set()
+    for v in sh.get("continues") or []:
+        try:
+            cont.add(int(v) - 1)
+        except Exception:
+            pass
+    segs, para, pstart, last = [], [], None, ""
 
     def flush():
         nonlocal para, pstart
@@ -1025,26 +1078,40 @@ def line_tidy(raw, style, accurate, budget):
             segs.append({"t": int(pstart), "h": False, "x": " ".join(para)})
         para, pstart = [], None
 
-    for kind, v in order:
-        if kind == "break":
+    for k, (t, heard) in enumerate(raw):
+        txt = keep_words(heard, got[k], accurate) if k in got else heard
+        if style != "verbatim":
+            txt = drop_fillers(txt)
+        if not txt or not re.search(r"[؀-ۿA-Za-z0-9]", txt) or txt == last:
+            continue
+        last = txt
+        if k in heads:
             flush()
-        elif kind == "head":
+            segs.append({"t": int(t), "h": True, "x": heads[k]})
+        elif k in starts:
             flush()
-            pending_head = v
-        else:
-            txt = got.get(v) or raw[v][1]
-            if style != "verbatim":
-                txt = drop_fillers(txt)
-            if not txt or not re.search(r"[\u0600-\u06FFA-Za-z0-9]", txt) or txt == last:  # empty, or said twice in a row
-                continue
-            last = txt
-            if pending_head:
-                segs.append({"t": int(raw[v][0]), "h": True, "x": pending_head})
-                pending_head = None
-            if pstart is None:
-                pstart = raw[v][0]
-            para.append(txt)
+        if k in cont and k + 1 < len(raw):  # the sentence goes on: its full stop becomes a comma
+            txt = re.sub(r"[.]+$", "،", txt)
+        elif not re.search(r"[.؟?!:،]$", txt):
+            txt += "."
+        if pstart is None:
+            pstart = t
+        para.append(txt)
     flush()
+    # a heading over only a line of thanks at the end is not a section
+    while len(segs) >= 2 and segs[-2]["h"] and not segs[-1]["h"] and len(segs[-1]["x"]) < 40:
+        segs.pop(-2)
+    # write heading names the way they are spelled in the text (with their hamza)
+    body = " ".join(x["x"] for x in segs if not x["h"]).split()
+    for x in segs:
+        if x["h"]:
+            n = len(x["x"].split())
+            sk = [_skeleton_word(w) for w in x["x"].split()]
+            for i in range(len(body) - n + 1):
+                win = [re.sub(r"^[وفب]?(?=" + re.escape(sk[0][:1]) + ")", "", re.sub(r"[^\u0621-\u064A]", "", w)) for w in body[i:i + n]]
+                if [_skeleton_word(w) for w in win] == sk:
+                    x["x"] = " ".join(win)
+                    break
     return segs
 
 

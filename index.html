@@ -384,7 +384,6 @@ body.playing .reel{animation:spin 3s linear infinite}
       <button type="button" class="pill" id="v-copy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg><span>نسخ النص</span></button>
       <button type="button" class="pill" id="v-word"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14"/></svg>تنزيل ملف «وورد»</button>
       <button type="button" class="pill" id="v-txt"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14"/></svg>تنزيل ملف نصي</button>
-      <button type="button" class="pill" id="v-hamed" title="يقرأ النص المكتوب بصوت حامد"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9z"/></svg>بصوت حامد</button>
     </div>
   </div>
   <div class="info" id="v-note" hidden style="max-width:900px;margin:0 auto 14px"></div>
@@ -764,7 +763,7 @@ $('v-word').addEventListener('click', function(){
     '<body dir="rtl">' + body + '</body></html>';
   download(safeName(V.item.name) + '.doc', 'application/msword', '\ufeff' + html);
 });
-$('v-hamed').addEventListener('click', function(){ if (V) openPlayer(V.item); });
+
 
 /* ---------- my notebooks ---------- */
 function saveToLib(name, text, note, engine){
