@@ -925,6 +925,26 @@ def _reset_secs(v):
     return int(h or 0) * 3600 + int(mi or 0) * 60 + float(se or 0)
 
 
+def smart_chat(prompt, budget=90, max_tokens=6000, effort="medium", temperature=0.2):
+    """The writing jobs (spelling, word choice, summary): Groq's big assistant first; if its daily limit is used up,
+    Google's assistant (one quick try, no waiting); only then Groq's smaller one, whose writing is weaker."""
+    try:
+        return groq_chat(prompt, budget=max(20, budget * 0.5), max_tokens=max_tokens, effort=effort,
+                         models=["openai/gpt-oss-120b"], temperature=temperature)
+    except ClaudeUnavailable as e:
+        alog(f"[groq-chat] big assistant unavailable: {e!r}"[:140])
+    if GEMINI_KEY:
+        try:
+            out = ask_gemini(prompt, budget=45, timeout=45, rounds=1, retry_busy=False)
+            if out and out.strip():
+                alog("[assistant] written by google")
+                return out
+        except ClaudeUnavailable as e:
+            alog(f"[assistant] google unavailable: {e!r}"[:140])
+    return groq_chat(prompt, budget=max(20, budget * 0.5), max_tokens=max_tokens, effort=effort,
+                     models=["openai/gpt-oss-20b"], temperature=temperature)
+
+
 def groq_chat(prompt, budget=90, max_tokens=8000, effort="low", models=None, temperature=0.2):
     """Groq's free text assistants (very fast). Each has a small per-minute limit, so requests are spread over all of them."""
     import requests
@@ -1114,8 +1134,7 @@ def choose_words(raw, alts, budget, vocab=None):
               "اكتب لكل رقم سطراً بالشكل: الرقم: أ أو الرقم: ب، ولا شيء غير ذلك.\n\n"
               + "\n".join(f"{n + 1}) «{q[4]}» ← أ: {q[2]} / ب: {q[3]}" for n, q in enumerate(qs)))
     try:
-        out = groq_chat(prompt, budget=min(60, budget), max_tokens=5000, effort="medium",
-                        models=["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
+        out = smart_chat(prompt, budget=min(60, budget), max_tokens=5000, effort="medium",
                         temperature=0)  # the same answer every time
     except ClaudeUnavailable as e:
         alog(f"[groq-chat] word choice skipped: {e!r}"[:160])
@@ -1149,8 +1168,7 @@ def line_tidy(raw, style, accurate, budget, vocab=None, alts=None):
         try:
             # spelling needs the bigger assistant: it waits for it rather than taking the smaller one
             # spelling is simple: little «thinking», so it and the word choice fit the per-minute limit together
-            for line in groq_chat(clean_p, budget=budget, max_tokens=4500, effort="low",
-                                  models=["openai/gpt-oss-120b", "openai/gpt-oss-20b"]).splitlines():
+            for line in smart_chat(clean_p, budget=budget, max_tokens=4500, effort="low").splitlines():
                 if line.strip().startswith("ب:"):
                     continue
                 m = re.match(r"^\s*\[?(\d+)\]?\s*[|｜:.)-]\s*(.*)$", line.strip())
@@ -1268,14 +1286,13 @@ def align_alt(raw, second):
     return [" ".join(v) for v in out]
 
 
-CONDENSE_PROMPT = """أمامك فقرات مرقّمة من تفريغ مرتّب لتسجيل صوتي باللهجة السعودية. اكتب ملخصاً لكل فقرة {how}.
-القواعد:
-- بنفس كلمات المتكلم ولهجته وبصيغة المتكلم نفسه (أنا، قلت، عتبت عليهم)، لا تتكلم عنه بصيغة الغائب، ولا تحوّل للفصحى، ولا تستخدم نقاطاً.
-- جمل كاملة مفهومة ومترابطة، كل جملة معناها مكتمل، ولا تقطع جملة في منتصفها.
-- إملاء صحيح (الهمزات، التاء المربوطة) وترقيم صحيح: فاصلة بين أجزاء الجملة، ونقطة في نهاية الجملة فقط.
-- احذف: التحيات والشكر والدعاء، وعبارات الحمد والتسبيح، والتكرار، والكلام قليل الفائدة.
-- أبقِ كل معلومة مهمة: الأسماء، والملاحظات، والتقييمات، والأسباب، والأيام، والسور والأجزاء.
-- لا تضف أي معلومة غير موجودة.
+CONDENSE_PROMPT = """أمامك فقرات مرقّمة من تفريغ مرتّب لتسجيل صوتي باللهجة السعودية.
+المطلوب: ملخص يمشي مع الكلام خطوة خطوة من البداية للنهاية بنفس الترتيب، فقرة مقابل كل فقرة.
+- لكل فقرة: اذكر كل فكرة فيها بالترتيب في جملة كاملة واضحة، مع حذف الحشو والتكرار وعبارات الحمد والتسبيح والتحيات فقط. لا تتخطَّ أي فكرة أو معلومة مهمة (الأسماء، والملاحظات، والتقييمات، والأسباب، والأيام، والسور والأجزاء).
+- إذا احتاجت الجملة فاعلاً واضحاً ليُفهم المعنى (مثل: عتبت على مين؟)، فاستخدم ما يدل عليه الكلام نفسه، ولا تضف معلومة جديدة.
+- بنفس لهجة المتكلم وكلماته وبصيغة المتكلم (أنا، قلت، عتبت عليهم)، لا تتكلم عنه بصيغة الغائب، ولا نقاط.
+- إملاء صحيح تماماً (الهمزات في أول الكلمة ووسطها، والتاء المربوطة)، وترقيم صحيح: نقطة في نهاية كل جملة، وفاصلة فقط داخل الجملة الطويلة.
+- الطول: {how}.
 اكتب لكل فقرة رقمها ثم | ثم ملخصها في سطر واحد. الفقرة التي كلها تحية أو دعاء أو شكر اكتب بعد رقمها: -
 لا تكتب أي شيء آخر.
 
@@ -1299,7 +1316,7 @@ def condense(segs, style):
     paras = [i for i, x in enumerate(segs) if not x["h"]]
     if not paras:
         return segs
-    how = "مختصراً جداً (نحو ربع طولها أو ثلثه)، يبقى فيه المهم فقط" if style == "short" else "أقصر (نحو نصف طولها)"
+    how = "نحو ثلث طول الفقرة، يبقى فيه المهم فقط" if style == "short" else "نحو ثلثي طول الفقرة"
     groups, cur, size = [], [], 0
     for i in paras:
         if cur and size + len(segs[i]["x"]) > 2400:
@@ -1313,7 +1330,7 @@ def condense(segs, style):
     def one(g):
         prompt = CONDENSE_PROMPT.format(how=how) + "\n".join(f"{n + 1}| {segs[i]['x']}" for n, i in enumerate(g))
         try:  # the big assistant writes clearly; the second one only if its daily limit is used up
-            txt = groq_chat(prompt, budget=90, max_tokens=6000, effort="medium", models=["openai/gpt-oss-120b", "openai/gpt-oss-20b"])
+            txt = smart_chat(prompt, budget=90, max_tokens=7000, effort="medium")
         except ClaudeUnavailable as e:
             alog(f"[groq-chat] condense skipped: {e!r}"[:160])
             return {}
