@@ -240,6 +240,7 @@ def gemini_models():
 
 
 ASSIST_LOG = []
+EXHAUSTED = {}  # version name -> time until which its free limit is considered used up
 
 
 def alog(msg):
@@ -264,42 +265,58 @@ def ask_gemini(prompt, image_path=None, image_paths=None):
             cfg["thinkingConfig"] = {"thinkingBudget": 0} if model.startswith("gemini-2") else {"thinkingLevel": level}
         return {"contents": [{"role": "user", "parts": parts}], "generationConfig": cfg}
 
-    last = None
-    for model in gemini_models():
+    def ask_model(model):
+        """One version: the answer text, or (reason, busy) when it can't answer now."""
         levels = ["minimal", "low", None]  # least thinking first; step down only if this version refuses the setting
+        last = "?"
         for attempt in range(6):
             t0 = time.time()
             try:  # a version that is slow today is skipped instead of making the reader wait minutes
                 r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                                   headers={"x-goog-api-key": GEMINI_KEY}, json=body_for(model, levels[0]),
                                   timeout=(10, 120 if "lite" in model else 75))
-            except requests.exceptions.Timeout:
-                alog(f"[assistant] {model} too slow ({time.time() - t0:.0f}s): next version")
-                last = "timeout"
-                break
+            except requests.exceptions.RequestException as e:
+                alog(f"[assistant] {model} no answer ({time.time() - t0:.0f}s): {type(e).__name__}")
+                return ("timeout", True)
             alog(f"[assistant] {model} {r.status_code} in {time.time() - t0:.0f}s ({levels[0]})")
             if r.status_code == 400 and levels[0] and "think" in r.text.lower():
                 levels.pop(0)  # this version doesn't accept that setting: ask again with the next one
                 continue
             if r.status_code == 404:
-                last = f"model {model} not found"
-                break
+                return (f"model {model} not found", False)
             if r.status_code == 429:
-                last = "limit 429"
-                break  # this version's free limit is used up: go straight to the next version
+                EXHAUSTED[model] = time.time() + 600  # free limit used up: skip it for 10 minutes
+                return ("limit 429", False)
             if r.status_code in (500, 503):
                 last = f"busy {r.status_code}"
                 if attempt >= 1:
-                    break  # still busy after one retry: try the next version
+                    return (last, True)  # still busy after one retry: try the next version
                 time.sleep(2)
                 continue
             if r.status_code != 200:
                 raise ClaudeUnavailable(f"gemini {r.status_code}: {r.text[:200]}")
-            data = r.json()
             try:
-                return "".join(x.get("text", "") for x in data["candidates"][0]["content"]["parts"] if not x.get("thought"))
+                return "".join(x.get("text", "") for x in r.json()["candidates"][0]["content"]["parts"] if not x.get("thought"))
             except Exception:
-                raise ClaudeUnavailable("gemini empty")
+                return ("empty", True)
+        return (last, True)
+
+    last = None
+    for rnd in range(3):  # Google sometimes says «busy» for every version at once: wait a little and go round again
+        if rnd:
+            alog(f"[assistant] all versions busy: waiting {10 * rnd}s, round {rnd + 1}")
+            time.sleep(10 * rnd)
+        busy = False
+        for model in gemini_models():
+            if EXHAUSTED.get(model, 0) > time.time():
+                continue  # its free limit was used up recently: don't waste time asking again
+            got = ask_model(model)
+            if isinstance(got, str):
+                return got
+            last, b = got
+            busy = busy or b
+        if not busy:
+            break
     raise ClaudeUnavailable(f"gemini failed: {last}")
 
 
