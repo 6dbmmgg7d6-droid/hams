@@ -216,7 +216,7 @@ def ask_gemini(prompt, image_path=None, image_paths=None):
     for model in GEMINI_MODELS:
         for attempt in range(4):
             r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                              params={"key": GEMINI_KEY}, json=body, timeout=180)
+                              headers={"x-goog-api-key": GEMINI_KEY}, json=body, timeout=180)  # works for old and new key formats
             if r.status_code == 404:
                 last = "model"
                 break
