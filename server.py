@@ -1647,6 +1647,49 @@ def owner_usage(t: str = ""):
     return {"hours_until_yesterday": hrs, "today_minutes": round(SM_SECONDS[0] / 60, 1), "credits_start": 100}
 
 
+@app.post("/api/owner/gtts")
+async def owner_gtts(request: Request, t: str = "", voice: str = "Charon", model: str = ""):
+    """The owner's private test of Google's speech voices (nobody else can open it): text in, audio out."""
+    import base64
+    import requests
+    if not ADMIN_TOKEN or t != ADMIN_TOKEN or not GEMINI_KEY:
+        raise HTTPException(404, "not_found")
+    text = (await request.body()).decode("utf-8")[:6000]
+    names = [model] if model else []
+    if not names:
+        try:
+            r = requests.get("https://generativelanguage.googleapis.com/v1beta/models", params={"pageSize": 200},
+                             headers={"x-goog-api-key": GEMINI_KEY}, timeout=20)
+            names = sorted([m["name"].split("/")[-1] for m in r.json().get("models", []) if "tts" in m["name"]], reverse=True)
+        except Exception:
+            names = []
+    body = {"contents": [{"parts": [{"text": text}]}],
+            "generationConfig": {"responseModalities": ["AUDIO"],
+                                 "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}}}
+    tried = []
+    for name in names:
+        t0 = time.time()
+        r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{name}:generateContent",
+                          headers={"x-goog-api-key": GEMINI_KEY}, json=body, timeout=180)
+        tried.append(f"{name} {r.status_code} {time.time() - t0:.0f}s {r.text[:160] if r.status_code != 200 else ''}")
+        if r.status_code != 200:
+            continue
+        try:
+            part = r.json()["candidates"][0]["content"]["parts"][0]["inline_data"]
+        except Exception:
+            try:
+                part = r.json()["candidates"][0]["content"]["parts"][0]["inlineData"]
+            except Exception:
+                continue
+        pcm = base64.b64decode(part["data"])
+        rate = int((re.search(r"rate=(\d+)", part.get("mime_type") or part.get("mimeType") or "") or [0, 24000])[1])
+        p = subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "s16le", "-ar", str(rate), "-ac", "1", "-i", "pipe:0",
+                            "-b:a", "64k", "-f", "mp3", "pipe:1"], input=pcm, capture_output=True)
+        from fastapi.responses import Response
+        return Response(p.stdout, media_type="audio/mpeg", headers={"X-Model": name, "X-Tried": " | ".join(tried)[:900].encode("ascii", "ignore").decode()})
+    return JSONResponse({"tried": tried, "models": names}, status_code=502)
+
+
 @app.get("/api/jobs/{jid}")
 def job_status(jid: str):
     j = JOBS_STATE.get(jid)
