@@ -1687,7 +1687,7 @@ async def owner_gtts(request: Request, t: str = "", voice: str = "Charon", model
                             "-b:a", "64k", "-f", "mp3", "pipe:1"], input=pcm, capture_output=True)
         from fastapi.responses import Response
         return Response(p.stdout, media_type="audio/mpeg", headers={"X-Model": name, "X-Tried": " | ".join(tried)[:900].encode("ascii", "ignore").decode()})
-    return JSONResponse({"tried": tried, "models": names}, status_code=502)
+    return JSONResponse({"tried": tried, "models": names}, status_code=409)  # (the host hides 502 bodies)
 
 
 @app.get("/api/jobs/{jid}")
