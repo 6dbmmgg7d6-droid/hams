@@ -1678,7 +1678,7 @@ def _gtts_work(text, voice, model):
         t0 = time.time()
         r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{name}:generateContent",
                           headers={"x-goog-api-key": GEMINI_KEY}, json=body, timeout=180)
-        tried.append(f"{name} {r.status_code} {time.time() - t0:.0f}s {r.text[:160] if r.status_code != 200 else ''}")
+        tried.append(f"{name} {r.status_code} {time.time() - t0:.0f}s {r.text[:2500] if r.status_code != 200 else ''}")
         if r.status_code != 200:
             continue
         try:
