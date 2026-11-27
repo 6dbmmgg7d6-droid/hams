@@ -1655,6 +1655,13 @@ async def owner_gtts(request: Request, t: str = "", voice: str = "Charon", model
     if not ADMIN_TOKEN or t != ADMIN_TOKEN or not GEMINI_KEY:
         raise HTTPException(404, "not_found")
     text = (await request.body()).decode("utf-8")[:6000]
+    # the slow call to Google runs on the side, so the server keeps answering everyone else meanwhile
+    return await asyncio.to_thread(_gtts_work, text, voice, model)
+
+
+def _gtts_work(text, voice, model):
+    import base64
+    import requests
     names = [model] if model else []
     if not names:
         try:
